@@ -1,5 +1,5 @@
 # TÁO XOÀI TOOL - TELEGRAM BOT ONLY
-# CLEAN V57 · 67 board strategies + HASH-36 CALIBRATED
+# CLEAN V58 · 67 board strategies + HASH-36 CALIBRATED + DEBIASED
 # Run: python bot_tele.py
 
 import os, json, math, time, asyncio, sqlite3, re, html, hashlib
@@ -4804,16 +4804,18 @@ def _v57_hist_prob(model,z):
     for name,val in f.items():
         t,x=(tables.get(name) or {}).get(val,(0,0)); n=t+x
         if n<6:continue
-        # Beta shrinkage lớn để không biến nhiễu thành edge giả.
-        p=(t+10*prior)/(n+10)
-        reliability=min(1.0,n/45.0)
-        vals.append((p,reliability));support+=n
-    if not vals:return prior,0
+        # Ước lượng conditional có shrinkage, sau đó TRỪ base-rate của bàn.
+        # Nhờ vậy lịch sử 55-60% TÀI không khiến mọi hash tự động nghiêng TÀI.
+        raw=(t+12*prior)/(n+12)
+        reliability=min(1.0,n/55.0)
+        edge=(raw-prior)*reliability
+        vals.append((edge,reliability));support+=n
+    if not vals:return .5,0
     sw=sum(w for _,w in vals) or 1
-    p=sum(v*w for v,w in vals)/sw
-    # Kéo mạnh về prior; chỉ giữ edge lặp lại ở nhiều feature.
-    p=prior + (p-prior)*0.55
-    return _clip(p,.42,.58),support
+    edge=sum(e*w for e,w in vals)/sw
+    # Chỉ giữ phần edge vượt khỏi tỷ lệ nền, luôn center quanh 50/50.
+    p=.5+edge*0.72
+    return _clip(p,.455,.545),support
 
 
 def _v57_hash_history_model():
@@ -4838,15 +4840,23 @@ def _v57_hash_history_model():
             cut=max(120,int(len(rows)*.78)); train=rows[:cut]; test=rows[cut:]
             if len(test)>=40:
                 m=_v57_train_hist(train); correct=0;brier=0.0
+                tp=tn=fp=fn=0;pred_tai=0
                 for z,y in test:
                     p,_=_v57_hist_prob(m,z); pred='TÀI' if p>=.5 else 'XỈU'
-                    correct += pred==y
+                    pred_tai += pred=='TÀI'; correct += pred==y
+                    if y=='TÀI' and pred=='TÀI':tp+=1
+                    elif y=='TÀI':fn+=1
+                    elif pred=='XỈU':tn+=1
+                    else:fp+=1
                     yy=1.0 if y=='TÀI' else 0.0;brier+=(p-yy)**2
                 acc=correct/len(test); brier/=len(test)
+                tpr=tp/max(1,tp+fn);tnr=tn/max(1,tn+fp);bal_acc=(tpr+tnr)/2
+                pred_tai_share=pred_tai/max(1,len(test))
                 full=_v57_train_hist(rows)
-                # Gate chặt: nếu holdout không có edge thật thì không cho model lịch sử tham gia.
-                valid=(acc>=.535 and brier<=.2495)
-                payload.update({'ready':True,'valid':valid,'accuracy':acc,'brier':brier,'model':full})
+                # Không cho model majority-class lọt gate: phải tốt ở CẢ TÀI lẫn XỈU.
+                valid=(bal_acc>=.535 and acc>=.515 and brier<=.251 and .20<=pred_tai_share<=.80)
+                payload.update({'ready':True,'valid':valid,'accuracy':acc,'balanced_accuracy':bal_acc,
+                                'pred_tai_share':pred_tai_share,'brier':brier,'model':full})
     except Exception:
         pass
     st['ts']=now;st['payload']=payload
@@ -4862,35 +4872,44 @@ def hash_ultra_predict(hash_hex):
 
     base_p=float(base.get('tai_pct',50))/100.0
     base_agree=float(base.get('agreement',50))/100.0
-    # Structural hash heuristics are intentionally weak: shrink 76% toward neutral.
-    p=.5+(base_p-.5)*.24
+    # HASH-36 cũ có thiên lệch nền về TÀI (~67% direction trên hash ngẫu nhiên).
+    # Center theo median nền của ensemble rồi mới lấy edge, thay vì center tại 0.50.
+    # MD5/SHA256 dùng center riêng vì phân phối ensemble hơi khác nhau.
+    raw_center=.5525 if len(z)==32 else .5518
+    raw_edge=base_p-raw_center
+    p=.5+raw_edge*.16
     hist=None;hist_used=False;hist_p=.5
     if len(z)==32:
         hist=_v57_hash_history_model()
         if hist.get('valid') and hist.get('model'):
             hist_p,support=_v57_hist_prob(hist['model'],z)
-            # Holdout-validated history gets most of the edge; raw-hash stays only a tie-breaker.
-            p=.5+(hist_p-.5)*.72+(base_p-.5)*.14
+            # History đã được de-bias base-rate + balanced holdout; hash thô chỉ tie-break nhẹ.
+            p=.5+(hist_p-.5)*.56+raw_edge*.08
             hist_used=True
 
+    # Neutral zone: khi edge cực nhỏ dùng 1 bit cryptographic để tránh tie mặc định về TÀI.
+    if abs(p-.5)<.0015:
+        tie=int(hashlib.blake2s(z.encode(),digest_size=1).hexdigest(),16)&1
+        p=.5015 if tie else .4985
     direction='TÀI' if p>=.5 else 'XỈU'
     edge=abs(p-.5)
-    # Confidence now means signal strength, not claimed win probability.
-    cap=58.0
+    # Giới hạn độ lệch hiển thị; hash không có mapping công khai thì không nên báo 65/35.
+    cap=54.8
     if hist_used:
-        acc=float(hist.get('accuracy',.5)); sample=int(hist.get('sample',0))
-        cap=60.0 if acc<.56 else 62.0 if sample>=400 else 60.5
-    strength=50+min(cap-50,edge*100*1.35)
-    # Disagreement in the old ensemble can only reduce confidence.
-    if base_agree<.56:strength=min(strength,54.5)
-    strength=_clip(strength,50.5,cap)
+        bal=float(hist.get('balanced_accuracy',.5)); sample=int(hist.get('sample',0))
+        cap=56.0 if bal<.56 else 57.5 if sample>=500 else 56.8
+    strength=50+min(cap-50,edge*100*1.18)
+    if base_agree<.56:strength=min(strength,53.8)
+    strength=_clip(strength,50.3,cap)
     tai=round(strength if direction=='TÀI' else 100-strength,2);xiu=round(100-tai,2)
     level='MẠNH' if hist_used and max(tai,xiu)>=60.5 else 'KHÁ' if max(tai,xiu)>=56.0 else 'NHẸ'
     result=dict(base,prediction=direction,tai_pct=tai,xiu_pct=xiu,
                 agreement=round(base_agree*100,1),level=level,models=36,
                 calibrated=True,hist_used=hist_used,
                 hist_sample=int(hist.get('sample',0)) if hist else 0,
-                hist_accuracy=round(float(hist.get('accuracy',.5))*100,1) if hist else 50.0)
+                hist_accuracy=round(float(hist.get('accuracy',.5))*100,1) if hist else 50.0,
+                hist_balanced_accuracy=round(float(hist.get('balanced_accuracy',.5))*100,1) if hist else 50.0,
+                debiased=True)
     _hash_v57_cache[z]=dict(result);_hash_v57_order.append(z)
     if len(_hash_v57_order)>4096:
         old=_hash_v57_order.pop(0);_hash_v57_cache.pop(old,None)
