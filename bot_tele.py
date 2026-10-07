@@ -1,5 +1,5 @@
 # TÁO XOÀI TOOL - TELEGRAM BOT ONLY
-# CLEAN V56 · 67 board strategies + HASH-36
+# CLEAN V57 · 67 board strategies + HASH-36 CALIBRATED
 # Run: python bot_tele.py
 
 import os, json, math, time, asyncio, sqlite3, re, html, hashlib
@@ -4749,6 +4749,161 @@ def hash_ultra_predict(hash_hex):
     if len(_hash_v56_order)>4096:
         old=_hash_v56_order.pop(0);_hash_v56_cache.pop(old,None)
     return result
+
+
+# ============================================================
+# V57 · HASH CALIBRATED — giảm false-confidence cho MD5/SHA256
+# Hash một chiều tự thân không chứa bảo đảm dự đoán kết quả. Khối này:
+# 1) shrink tín hiệu cấu trúc về 50%; 2) với MD5, chỉ dùng lịch sử LC79
+#    khi mô hình lịch sử qua holdout; 3) cap confidence nếu edge chưa ổn định.
+# ============================================================
+_v56_hash_ultra_predict_v57 = hash_ultra_predict
+_hash_v57_cache = {}
+_hash_v57_order = []
+_hash_v57_hist_state = {'ts':0.0,'payload':None}
+
+
+def _v57_hash_feature_keys(z):
+    """Feature rời rạc, support cao, tránh học thuộc full hash."""
+    nib=[int(c,16) for c in z]
+    bs=bytes.fromhex(z)
+    s=sum(nib)
+    xv=0
+    for b in bs:xv ^= b
+    bit=sum(b.bit_count() for b in bs)
+    L=len(z)
+    return {
+        'p0':nib[0], 'p7':nib[min(7,L-1)], 'p15':nib[min(15,L-1)], 'plast':nib[-1],
+        'prefix2':int(z[:2],16)//16,
+        'suffix2':int(z[-2:],16)//16,
+        'sum16':s%16,
+        'xor16':xv%16,
+        'bit8':min(7,int((bit/(8*len(bs)))*8)),
+        'mean8':min(7,int((sum(nib)/L)/16*8)),
+    }
+
+
+def _v57_train_hist(rows):
+    tables={k:{} for k in ('p0','p7','p15','plast','prefix2','suffix2','sum16','xor16','bit8','mean8')}
+    tai=sum(1 for z,y in rows if y=='TÀI'); n=len(rows)
+    prior=(tai+8)/(n+16) if n else .5
+    for z,y in rows:
+        f=_v57_hash_feature_keys(z)
+        for name,val in f.items():
+            t,x=tables[name].get(val,(0,0))
+            if y=='TÀI':t+=1
+            else:x+=1
+            tables[name][val]=(t,x)
+    return {'prior':prior,'tables':tables,'n':n}
+
+
+def _v57_hist_prob(model,z):
+    if not model:return .5,0
+    f=_v57_hash_feature_keys(z); vals=[]; support=0
+    prior=float(model.get('prior',.5)); tables=model.get('tables') or {}
+    for name,val in f.items():
+        t,x=(tables.get(name) or {}).get(val,(0,0)); n=t+x
+        if n<6:continue
+        # Beta shrinkage lớn để không biến nhiễu thành edge giả.
+        p=(t+10*prior)/(n+10)
+        reliability=min(1.0,n/45.0)
+        vals.append((p,reliability));support+=n
+    if not vals:return prior,0
+    sw=sum(w for _,w in vals) or 1
+    p=sum(v*w for v,w in vals)/sw
+    # Kéo mạnh về prior; chỉ giữ edge lặp lại ở nhiều feature.
+    p=prior + (p-prior)*0.55
+    return _clip(p,.42,.58),support
+
+
+def _v57_hash_history_model():
+    now=time.monotonic(); st=_hash_v57_hist_state
+    if st.get('payload') is not None and now-float(st.get('ts',0))<90:
+        return st['payload']
+    payload={'ready':False,'valid':False,'sample':0,'accuracy':.5,'brier':.25,'model':None}
+    try:
+        with sqlite3.connect(DB_PATH,timeout=1.5) as db:
+            raw=db.execute("""SELECT md5,result FROM rounds
+                              WHERE board='lc79:md5' AND md5 IS NOT NULL
+                                AND result IN ('TÀI','XỈU')
+                              ORDER BY seen_at DESC LIMIT 2400""").fetchall()
+        rows=[]
+        seen=set()
+        for z,y in reversed(raw):
+            z=str(z or '').strip().lower()
+            if z in seen or not re.fullmatch(r'[0-9a-f]{32}',z):continue
+            seen.add(z);rows.append((z,y))
+        payload['sample']=len(rows)
+        if len(rows)>=180:
+            cut=max(120,int(len(rows)*.78)); train=rows[:cut]; test=rows[cut:]
+            if len(test)>=40:
+                m=_v57_train_hist(train); correct=0;brier=0.0
+                for z,y in test:
+                    p,_=_v57_hist_prob(m,z); pred='TÀI' if p>=.5 else 'XỈU'
+                    correct += pred==y
+                    yy=1.0 if y=='TÀI' else 0.0;brier+=(p-yy)**2
+                acc=correct/len(test); brier/=len(test)
+                full=_v57_train_hist(rows)
+                # Gate chặt: nếu holdout không có edge thật thì không cho model lịch sử tham gia.
+                valid=(acc>=.535 and brier<=.2495)
+                payload.update({'ready':True,'valid':valid,'accuracy':acc,'brier':brier,'model':full})
+    except Exception:
+        pass
+    st['ts']=now;st['payload']=payload
+    return payload
+
+
+def hash_ultra_predict(hash_hex):
+    z=(hash_hex or '').strip().lower()
+    hit=_hash_v57_cache.get(z)
+    if hit is not None:return dict(hit)
+    base=_v56_hash_ultra_predict_v57(z)
+    if len(z) not in (32,64) or not re.fullmatch(r'[0-9a-f]+',z):return base
+
+    base_p=float(base.get('tai_pct',50))/100.0
+    base_agree=float(base.get('agreement',50))/100.0
+    # Structural hash heuristics are intentionally weak: shrink 76% toward neutral.
+    p=.5+(base_p-.5)*.24
+    hist=None;hist_used=False;hist_p=.5
+    if len(z)==32:
+        hist=_v57_hash_history_model()
+        if hist.get('valid') and hist.get('model'):
+            hist_p,support=_v57_hist_prob(hist['model'],z)
+            # Holdout-validated history gets most of the edge; raw-hash stays only a tie-breaker.
+            p=.5+(hist_p-.5)*.72+(base_p-.5)*.14
+            hist_used=True
+
+    direction='TÀI' if p>=.5 else 'XỈU'
+    edge=abs(p-.5)
+    # Confidence now means signal strength, not claimed win probability.
+    cap=58.0
+    if hist_used:
+        acc=float(hist.get('accuracy',.5)); sample=int(hist.get('sample',0))
+        cap=60.0 if acc<.56 else 62.0 if sample>=400 else 60.5
+    strength=50+min(cap-50,edge*100*1.35)
+    # Disagreement in the old ensemble can only reduce confidence.
+    if base_agree<.56:strength=min(strength,54.5)
+    strength=_clip(strength,50.5,cap)
+    tai=round(strength if direction=='TÀI' else 100-strength,2);xiu=round(100-tai,2)
+    level='MẠNH' if hist_used and max(tai,xiu)>=60.5 else 'KHÁ' if max(tai,xiu)>=56.0 else 'NHẸ'
+    result=dict(base,prediction=direction,tai_pct=tai,xiu_pct=xiu,
+                agreement=round(base_agree*100,1),level=level,models=36,
+                calibrated=True,hist_used=hist_used,
+                hist_sample=int(hist.get('sample',0)) if hist else 0,
+                hist_accuracy=round(float(hist.get('accuracy',.5))*100,1) if hist else 50.0)
+    _hash_v57_cache[z]=dict(result);_hash_v57_order.append(z)
+    if len(_hash_v57_order)>4096:
+        old=_hash_v57_order.pop(0);_hash_v57_cache.pop(old,None)
+    return result
+
+
+def format_hash_prediction(hash_hex,result=None):
+    r=result or hash_ultra_predict(hash_hex)
+    note=(f" · học LS {r.get('hist_accuracy',50):.1f}%" if r.get('hist_used') else '')
+    return (f"<b>🔐 {r['type']}</b>\n"
+            f"TÀI <b>{r['tai_pct']:.2f}%</b>  •  XỈU <b>{r['xiu_pct']:.2f}%</b>\n"
+            f"🎯 <b>{r['prediction']} · {r['level']}</b>\n"
+            f"<i>{r['models']} tín hiệu · đã hiệu chỉnh{note}</i>")
 
 _v55_refresh_shared_prediction_v56 = refresh_shared_prediction
 
