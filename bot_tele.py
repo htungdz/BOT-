@@ -446,15 +446,17 @@ def start_websocket(cid, token, username=""):
             auto_st = "🟢 BẬT" if st["auto_bet_enabled"] else "🔴 TẮT"
             
             msg = (
-                f"🔥 **LCVIP BY ONGCHUSUNWIN** 🔥\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🎲 **MÃ PHIÊN:** `#{st['session_id']}`\n"
-                f"🤖 **DỰ ĐOÁN:** **{result[0]}** | 🎯 **Độ tin cậy:** `{st['current_conf']}%`\n"
-                f"📊 **Phân tích:** _{st['current_reason']}_\n"
-                f"💰 **Mức cược:** `{tien:,} VNĐ` | 💸 **X2:** `{x2_st}`\n"
-                f"⚡ **Auto Bet:** `{auto_st}`\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"⏳ *Đang chờ vào cược...*"
+                f"👑 *LCVIP BY ONGCHUSUNWIN* 👑\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"🎲 *PHIÊN*  `#{st['session_id']}`\n"
+                f"🎯 *DỰ ĐOÁN*  {'🟢' if result[0] == 'TAI' else '🔴'} *{result[0]}*\n"
+                f"📈 *Tín hiệu thuật toán:* `{st['current_conf']}%`\n"
+                f"🧠 *Phân tích:* _{st['current_reason']}_\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"💵 *Cược dự kiến:* `{tien:,}đ`\n"
+                f"⚡ *Auto:* {auto_st}   |   🔁 *X2:* `{x2_st}`\n"
+                f"📡 *Trạng thái:* ⏳ Chờ xác nhận cược\n"
+                f"━━━━━━━━━━━━━━━━━━━━"
             )
             sent_msg = safe_send_and_clean(cid, msg, delay=0)
             if sent_msg:
@@ -476,14 +478,16 @@ def start_websocket(cid, token, username=""):
                 if st.get("last_pred_msg_id"):
                     try:
                         edited_text = (
-                            f"🔥 **LCVIP BY ONGCHUSUNWIN** 🔥\n"
-                            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                            f"🎲 **MÃ PHIÊN:** `#{st['session_id']}`\n"
-                            f"🚀 **ĐÃ ĐẶT CƯỢC:** **{st['current_prediction']}**\n"
-                            f"💵 **Số tiền cược:** `{tien:,} VNĐ`\n"
-                            f"💸 **Cấp X2:** `{x2_st}`\n"
-                            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                            f"✅ *Đặt cược thành công! Đang chờ kết quả...*"
+                            f"👑 *LCVIP BY ONGCHUSUNWIN* 👑\n"
+                            f"━━━━━━━━━━━━━━━━━━━━\n"
+                            f"🎲 *PHIÊN*  `#{st['session_id']}`\n"
+                            f"🎯 *DỰ ĐOÁN*  {'🟢' if st['current_prediction'] == 'TAI' else '🔴'} *{st['current_prediction']}*\n"
+                            f"📈 *Tín hiệu thuật toán:* `{st['current_conf']}%`\n"
+                            f"━━━━━━━━━━━━━━━━━━━━\n"
+                            f"💵 *Tiền cược yêu cầu:* `{tien:,}đ`\n"
+                            f"🔁 *X2:* `{x2_st}`\n"
+                            f"📡 *Trạng thái:* 🟡 Đã gửi lệnh cược, chờ xác nhận\n"
+                            f"━━━━━━━━━━━━━━━━━━━━"
                         )
                         bot.edit_message_text(edited_text, cid, st["last_pred_msg_id"], parse_mode="Markdown")
                     except Exception:
@@ -524,16 +528,16 @@ def start_websocket(cid, token, username=""):
                 if st.get("last_pred_msg_id"):
                     try:
                         final_text = (
-                            f"🔥 **LCVIP BY ONGCHUSUNWIN** 🔥\n"
-                            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                            f"🎲 **MÃ PHIÊN:** `#{sess_id}`\n"
-                            f"🎲 **Xúc xắc:** `{dice_str}` ({total_pts} điểm) ➔ **{res}**\n"
-                            f"⚠️ **Trạng thái:** `Chưa đặt cược`\n"
-                            f"💰 **Số dư:** `{st['balance']:,} VNĐ`\n"
-                            f"━━━━━━━━━━━━━━━━━━━━━━"
+                            f"👑 *LCVIP BY ONGCHUSUNWIN* 👑\n"
+                            f"━━━━━━━━━━━━━━━━━━━━\n"
+                            f"🎲 *PHIÊN*  `#{sess_id}`\n"
+                            f"🎯 *DỰ ĐOÁN*  *{pred or 'KHÔNG CÓ'}*\n"
+                            f"🎲 *KẾT QUẢ*  *{res}* • `{dice_str}` = `{total_pts}`\n"
+                            f"⚪ *CHƯA CƯỢC* • Không tính lãi/lỗ\n"
+                            f"💰 *Số dư:* `{st['balance']:,}đ`\n"
+                            f"━━━━━━━━━━━━━━━━━━━━"
                         )
                         bot.edit_message_text(final_text, cid, st["last_pred_msg_id"], parse_mode="Markdown")
-                        delete_message_later(cid, st["last_pred_msg_id"], delay=8)
                     except Exception:
                         pass
                 return
@@ -559,13 +563,16 @@ def start_websocket(cid, token, username=""):
                     tt_icon = "🟢 THẮNG KHỦNG" if is_win else "🔴 THUA CƯỢC"
                     lai_lo_str = f"+{bet_amt:,}" if is_win else f"-{bet_amt:,}"
                     final_text = (
-                        f"🔥 **LCVIP BY ONGCHUSUNWIN** 🔥\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"🎲 **MÃ PHIÊN:** `#{sess_id}`\n"
-                        f"🎲 **Xúc xắc:** `{dice_str}` ({total_pts} điểm) ➔ **{res}**\n"
-                        f"🎯 **Dự đoán:** `{pred}` ➔ **{tt_icon}** (`{lai_lo_str} VNĐ`)\n"
-                        f"💵 **Số dư hiện tại:** `{st['balance']:,} VNĐ`\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━"
+                        f"👑 *LCVIP BY ONGCHUSUNWIN* 👑\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🎲 *PHIÊN*  `#{sess_id}`\n"
+                        f"🎯 *DỰ ĐOÁN*  *{pred}*  ➜  *{res}*\n"
+                        f"🎲 *Xúc xắc:* `{dice_str}` = `{total_pts}` điểm\n"
+                        f"{'✅ *HÚP*' if is_win else '❌ *GÃY*'}\n"
+                        f"💵 *Cược yêu cầu:* `{bet_amt:,}đ`\n"
+                        f"💰 *Lãi/lỗ ước tính:* `{lai_lo_str}đ`\n"
+                        f"🏦 *Số dư:* `{st['balance']:,}đ`\n"
+                        f"━━━━━━━━━━━━━━━━━━━━"
                     )
                     bot.edit_message_text(final_text, cid, st["last_pred_msg_id"], parse_mode="Markdown")
                     delete_message_later(cid, st["last_pred_msg_id"], delay=8)
@@ -583,29 +590,101 @@ def start_websocket(cid, token, username=""):
 # ==========================================
 # 🎮 LỆNH ĐIỀU KHIỂN BOT
 # ==========================================
-@bot.message_handler(commands=['start'])
+def main_menu(cid):
+    kb = telebot.types.InlineKeyboardMarkup(row_width=2)
+    buttons = [
+        telebot.types.InlineKeyboardButton("🔐 Đăng nhập", callback_data="menu_login"),
+        telebot.types.InlineKeyboardButton("🔑 Nhập key", callback_data="menu_key"),
+        telebot.types.InlineKeyboardButton("💎 Tài khoản", callback_data="menu_info"),
+        telebot.types.InlineKeyboardButton("⚡ Auto cược", callback_data="menu_auto"),
+        telebot.types.InlineKeyboardButton("💸 Chế độ X2", callback_data="menu_x2"),
+        telebot.types.InlineKeyboardButton("📖 Hướng dẫn", callback_data="menu_help"),
+        telebot.types.InlineKeyboardButton("⏹ Ngắt kết nối", callback_data="menu_stop"),
+        telebot.types.InlineKeyboardButton("🔄 Làm mới", callback_data="menu_home"),
+    ]
+    for i in range(0, len(buttons), 2):
+        kb.row(*buttons[i:i+2])
+    if cid == ADMIN_ID:
+        kb.row(telebot.types.InlineKeyboardButton("👑 Lệnh quản trị", callback_data="menu_admin"))
+    return kb
+
+
+def menu_text(cid):
+    active = check_auth(cid)
+    expiry = ("Vĩnh viễn" if cid == ADMIN_ID else format_expire_time(authorized_users[cid])) if active else "Chưa kích hoạt"
+    lines = [
+        "👑 LCVIP BY ONGCHUSUNWIN",
+        "━━━━━━━━━━━━━━━━━━",
+        f"🔐 Trạng thái: {'VIP đang hoạt động' if active else 'Chưa kích hoạt VIP'}",
+        f"⏳ Hạn dùng: {expiry}",
+        "", "📋 DANH SÁCH LỆNH", "",
+        "/start - Xem danh sách lệnh",
+        "/huongdan - Hướng dẫn sử dụng",
+        "/nhapkey - Nhập key VIP",
+        "/thongtin - Thông tin tài khoản",
+        "/login - Đăng nhập game",
+        "/autobet - Bật/tắt auto cược",
+        "/x2 - Quản lý chế độ X2",
+        "/stop - Ngắt kết nối",
+    ]
+    if cid == ADMIN_ID:
+        lines.extend(["", "👑 LỆNH QUẢN TRỊ", "",
+            "/dsuser - Thống kê người dùng",
+            "/tatbot - Tắt bot", "/mobot - Mở bot",
+            "/lichsucau - Lịch sử 30 phiên",
+            "/xuatfile - Xuất lịch sử TXT",
+            "/taokey - Tạo key", "/danhsachkey - Danh sách key",
+            "/thongbao - Thông báo toàn bộ",
+            "/lichsulogin - Danh sách đăng nhập"])
+    lines.extend(["", "━━━━━━━━━━━━━━━━━━", f"📩 Hỗ trợ: {ADMIN_USERNAME}"])
+    return "\n".join(lines)
+
+
+@bot.message_handler(commands=['start', 'menu'])
 def cmd_start(m):
     cid = m.chat.id
     uname = m.from_user.username or m.from_user.first_name or "Unknown"
     all_known_users[cid] = f"@{uname}" if m.from_user.username else uname
     init_user_state(cid)
-    
     if not SYSTEM_ACTIVE and cid != ADMIN_ID:
-        return safe_send_and_clean(cid, "🔴 **Hệ thống LCVIP đang tạm tắt bởi Admin!**", delay=6)
-    
-    # Ẩn hoàn toàn lệnh Admin khỏi user thường, chỉ cấp menu admin riêng cho Admin
-    if cid == ADMIN_ID:
-        bot.set_my_commands(ADMIN_COMMANDS, scope=telebot.types.BotCommandScopeChat(cid))
-    else:
-        bot.set_my_commands(USER_COMMANDS, scope=telebot.types.BotCommandScopeChat(cid))
+        return bot.send_message(cid, "🔴 Hệ thống đang tạm dừng!")
+    scope = telebot.types.BotCommandScopeChat(cid)
+    try:
+        bot.set_my_commands(ADMIN_COMMANDS if cid == ADMIN_ID else USER_COMMANDS, scope=scope)
+    except Exception as exc:
+        logger.warning("Không cập nhật được danh sách lệnh Telegram: %s", exc)
+    bot.send_message(cid, menu_text(cid))
 
-    if check_auth(cid):
-        han = "Vĩnh Viễn" if cid == ADMIN_ID else format_expire_time(authorized_users[cid])
-        msg = f"👑 **LCVIP BY ONGCHUSUNWIN** 👑\n💎 **Hạn VIP:** `{han}`\n👉 Gõ `/huongdan` để xem các lệnh sử dụng."
-        safe_send_and_clean(cid, msg, delay=10)
-    else:
-        msg = f"🔒 **Chưa kích hoạt LCVIP!**\n🔑 Nhập key: `/nhapkey MÃ`\n📩 Mua key liên hệ Admin: {ADMIN_USERNAME}"
-        safe_send_and_clean(cid, msg, delay=10)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('menu_'))
+def menu_callback(call):
+    cid = call.message.chat.id
+    action = call.data[5:]
+    bot.answer_callback_query(call.id)
+    if not SYSTEM_ACTIVE and cid != ADMIN_ID:
+        return bot.send_message(cid, "🔴 Hệ thống đang tạm dừng!")
+    if action == 'home':
+        try:
+            bot.edit_message_text(menu_text(cid), cid, call.message.message_id, reply_markup=main_menu(cid))
+        except Exception:
+            bot.send_message(cid, menu_text(cid), reply_markup=main_menu(cid))
+        return
+    prompts = {
+        'login': "🔐 Đăng nhập bằng lệnh:\n/login TAIKHOAN MATKHAU\n⚠️ Không chia sẻ mật khẩu trong nhóm.",
+        'key': "🔑 Kích hoạt VIP:\n/nhapkey MA_KEY",
+        'auto': "⚡ Điều khiển tự động cược:\n/autobet on 10000\n/autobet off\n⚠️ Cần đăng nhập game trước.",
+        'x2': "💸 Chế độ X2:\n/x2 on\n/x2 off\n⚠️ Tăng cược khi thua có rủi ro mất tiền nhanh.",
+        'admin': "👑 Quản trị:\n/taokey /danhsachkey /dsuser\n/tatbot /mobot /thongbao\n/lichsucau /xuatfile /lichsulogin",
+    }
+    if action == 'admin' and cid != ADMIN_ID:
+        return bot.send_message(cid, "⛔ Chỉ dành cho admin.")
+    if action in prompts:
+        return bot.send_message(cid, prompts[action], reply_markup=main_menu(cid))
+    if action in ('info', 'stop', 'help'):
+        from types import SimpleNamespace
+        fake = SimpleNamespace(chat=call.message.chat, from_user=call.from_user,
+                               text='/' + {'info':'thongtin','stop':'stop','help':'huongdan'}[action])
+        {'info':tt, 'stop':sp, 'help':cmd_huongdan}[action](fake)
 
 @bot.message_handler(commands=['huongdan'])
 def cmd_huongdan(m):
