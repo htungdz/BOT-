@@ -1,1 +1,4 @@
-httpx==0.27.2
+pyTelegramBotAPI
+requests
+python-socketio[client]
+Flask
