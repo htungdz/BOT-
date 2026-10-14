@@ -1,4 +1,3 @@
-
 import telebot
 import requests
 import hashlib
@@ -12,17 +11,12 @@ import socketio
 import random
 import string
 import os
-import statistics
 from flask import Flask
-from collections import deque, defaultdict
+from collections import deque
 from datetime import datetime, timezone, timedelta
 
-# Múi giờ Việt Nam (GMT+7)
 ICT = timezone(timedelta(hours=7))
 
-# =========================
-# FLASK KEEP ALIVE
-# =========================
 app = Flask(__name__)
 
 @app.route("/")
@@ -38,7 +32,7 @@ def run_web():
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 # ==========================================
-# CẤU HÌNH HỆ THỐNG BOT & LOGGING
+# CONFIG
 # ==========================================
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -52,51 +46,64 @@ bot = telebot.TeleBot(BOT_TOKEN)
 
 SYSTEM_ACTIVE = True
 
-# Danh sách lệnh CHỈ dành cho User thường (Hoàn toàn không có lệnh Admin)
 USER_COMMANDS = [
-    telebot.types.BotCommand("/start", "🏠 Mở menu LCVIP"),
+    telebot.types.BotCommand("/start", "🏠 Menu LCVIP"),
     telebot.types.BotCommand("/huongdan", "📖 Hướng dẫn"),
     telebot.types.BotCommand("/nhapkey", "🔑 Nhập key VIP"),
     telebot.types.BotCommand("/thongtin", "💎 Thông tin tài khoản"),
     telebot.types.BotCommand("/login", "🔐 Đăng nhập game"),
-    telebot.types.BotCommand("/autobet", "⚡ Bật/Tắt Auto"),
-    telebot.types.BotCommand("/x2", "🔁 Bật/Tắt X2"),
-    telebot.types.BotCommand("/stop", "⏹️ Ngắt kết nối"),
+    telebot.types.BotCommand("/autobetmd5", "⚡ Auto cược MD5"),
+    telebot.types.BotCommand("/autobethu", "🎲 Auto cược Hũ"),
+    telebot.types.BotCommand("/hulichsu", "📜 Lịch sử Hũ"),
+    telebot.types.BotCommand("/stop", "⏹️ Ngắt tất cả"),
 ]
 
-# Danh sách lệnh đầy đủ dành RIÊNG cho Admin
 ADMIN_COMMANDS = USER_COMMANDS + [
-    telebot.types.BotCommand("/dsuser", "👥 [ADMIN] Thống kê User SD"),
-    telebot.types.BotCommand("/tatbot", "🔴 [ADMIN] Tắt toàn bộ Bot"),
-    telebot.types.BotCommand("/mobot", "🟢 [ADMIN] Mở lại Bot"),
-    telebot.types.BotCommand("/lichsucau", "📊 [ADMIN] Xem lịch sử 30 phiên"),
-    telebot.types.BotCommand("/xuatfile", "📁 [ADMIN] Xuất file TXT lịch sử"),
-    telebot.types.BotCommand("/taokey", "👑 [ADMIN] Tạo key theo giờ"),
+    telebot.types.BotCommand("/dsuser", "👥 [ADMIN] DS User"),
+    telebot.types.BotCommand("/tatbot", "🔴 [ADMIN] Tắt Bot"),
+    telebot.types.BotCommand("/mobot", "🟢 [ADMIN] Mở Bot"),
+    telebot.types.BotCommand("/xuatfile", "📁 [ADMIN] Xuất TXT"),
+    telebot.types.BotCommand("/taokey", "👑 [ADMIN] Tạo key"),
     telebot.types.BotCommand("/danhsachkey", "📋 [ADMIN] DS Key"),
-    telebot.types.BotCommand("/thongbao", "📢 [ADMIN] Gửi thông báo All"),
+    telebot.types.BotCommand("/thongbao", "📢 [ADMIN] Thông báo All"),
     telebot.types.BotCommand("/lichsulogin", "📋 [ADMIN] DS Login"),
 ]
 
-# Đặt mặc định Telegram chỉ thấy lệnh User thường
 bot.set_my_commands(USER_COMMANDS, scope=telebot.types.BotCommandScopeDefault())
 
-HISTORY_API_URL = "https://wtxmd52.tele68.com/v1/txmd5/sessions"
-API_URL_FALLBACK = "https://living-telecommunications-start-consoles.trycloudflare.com/api/txmd5"
+# ============ GAME CONFIG (PARALLEL) ============
+MD5_HISTORY_API_URL = "https://wtxmd52.tele68.com/v1/txmd5/sessions"
+MD5_API_URL_FALLBACK = "https://living-telecommunications-start-consoles.trycloudflare.com/api/txmd5"
+MD5_SOCKET_URL = "https://wtxmd52.tele68.com"
+MD5_SOCKET_PATH = "txmd5/"
+MD5_NAMESPACE = "/txmd5"
+MD5_ORIGIN = "https://lc79b.bet"
+
+HU_SOCKET_URL = "https://wtx.tele68.com"
+HU_SOCKET_NAMESPACE = "/tx"
+HU_SOCKET_PATH = "tx/"
+HU_ORIGIN = "https://play.lc79.bet"
+HU_HISTORY_DB_PATH = os.environ.get("HU_HISTORY_DB_PATH", "lcvip_hu_history.json")
+
+# Chung cho cả 2 game
+WARMUP_SESSIONS = 5
 MAX_HISTORY_STORE = 500
-MIN_CONFIDENCE_AUTO_BET = 55
-AUTO_BET_RUN_UNTIL_STOP = True
 MAX_MARTINGALE_LEVEL = 6
 MARTINGALE_MULTIPLIER = 2
+MIN_BET = 1000
+MIN_HISTORY = 30
 
 active_sockets = {}
+hu_sockets = {}
 user_states = {}
 KEY_DB_PATH = os.environ.get("KEY_DB_PATH", "lcvip_keys.json")
+
 def load_keys():
     try:
         with open(KEY_DB_PATH, "r", encoding="utf-8") as f:
             raw = json.load(f)
         return {str(k): int(v) for k, v in raw.items() if int(v) > 0}
-    except (FileNotFoundError, ValueError, OSError, TypeError):
+    except Exception:
         return {}
 
 def save_keys():
@@ -112,7 +119,7 @@ login_history = []
 global_session_logs = deque(maxlen=200)
 
 # ==========================================
-# ⏱️ TỰ ĐỘNG XÓA TIN NHẮN RÁC
+# HELPERS
 # ==========================================
 def delete_message_later(chat_id, message_id, delay=5):
     def _delete():
@@ -133,179 +140,253 @@ def safe_send_and_clean(chat_id, text, parse_mode="Markdown", delay=6):
         return None
 
 # ============================================================
-# 🧠 REALBRAIN THUẬT TOÁN
+# 🧠 REALBRAIN
 # ============================================================
 class RealBrain:
     def __init__(self):
-        self.results = deque(maxlen=500)
-        self.sums = deque(maxlen=500)
-        self.perf = deque(maxlen=100)
-        self.pattern_memory = defaultdict(lambda: defaultdict(int))
-        self.pattern_total = defaultdict(int)
-        self.streak_memory = defaultdict(lambda: {"THEO": 0, "BE": 0})
+        self.perf = deque(maxlen=200)
 
-    def push(self, data):
-        for h in data:
-            if isinstance(h, dict) and 'result' in h:
-                res = h['result']
-            elif isinstance(h, str):
-                res = h
-            else:
-                continue
-            if 'TÀI' in str(res).upper() or 'TAI' in str(res).upper() or res == 'T':
-                self.results.append('TAI')
-            elif 'XỈU' in str(res).upper() or 'XIU' in str(res).upper() or res == 'X':
-                self.results.append('XIU')
-            else:
-                self.results.append(res)
-            if isinstance(h, dict) and 'total' in h:
-                self.sums.append(h['total'])
-            else:
-                self.sums.append(10)
+    @staticmethod
+    def normalize(value):
+        v = str(value).strip().upper()
+        if v in ("TAI", "TÀI", "T"):
+            return "TAI"
+        if v in ("XIU", "XỈU", "X"):
+            return "XIU"
+        return None
 
-    def learn(self):
-        all_res = list(self.results)
-        n = len(all_res)
-        if n < 10:
-            return
-        
-        self.pattern_memory.clear()
-        self.pattern_total.clear()
-        for i in range(n):
-            for plen in [3, 4, 5, 6]:
-                if i >= plen and i < n:
-                    pat = tuple(all_res[i-plen:i])
-                    nxt = all_res[i]
-                    self.pattern_memory[pat][nxt] += 1
-                    self.pattern_total[pat] += 1
-        
-        self.streak_memory.clear()
-        i = 0
-        while i < n:
-            last = all_res[i]
-            s = 1
-            j = i + 1
-            while j < n and all_res[j] == last:
-                s += 1
-                j += 1
-            if j < n:
-                nxt = all_res[j]
-                if nxt == last:
-                    self.streak_memory[s]["THEO"] += 1
+    def clean(self, history):
+        keyed, unkeyed = {}, []
+        for row in history:
+            if isinstance(row, dict):
+                side = self.normalize(row.get("result"))
+                session = row.get("session", row.get("id"))
+                if not side:
+                    continue
+                if session is not None:
+                    keyed[str(session)] = (session, side)
                 else:
-                    self.streak_memory[s]["BE"] += 1
-            i = j
+                    unkeyed.append(side)
+            else:
+                side = self.normalize(row)
+                if side:
+                    unkeyed.append(side)
+        if keyed:
+            def order(it):
+                try:
+                    return (0, int(it[0]))
+                except (ValueError, TypeError):
+                    return (1, str(it[0]))
+            return [s for _, s in sorted(keyed.values(), key=order)][-500:]
+        return unkeyed[-500:]
 
-    def predict(self, history):
-        if len(history) < 10:
-            return None, 0, "Đang nạp dữ liệu..."
-        
-        self.push(history)
-        self.learn()
-        r = list(self.results)
-        s_list = list(self.sums)
+    @staticmethod
+    def _beta_p(tai, total):
+        return (tai + 2.0) / (total + 4.0)
+
+    def _pattern_vote(self, r, length, min_support=8):
         n = len(r)
-        if n < 5:
-            return None, 0, "Đang phân tích..."
-        
-        last = r[-1]
-        last_sum = s_list[-1] if s_list else 10
-        
-        s = 1
+        if n <= length:
+            return None
+        pattern = tuple(r[-length:])
+        follow = [r[i] for i in range(length, n) if tuple(r[i-length:i]) == pattern]
+        if len(follow) < min_support:
+            return None
+        return self._beta_p(follow.count("TAI"), len(follow)), len(follow)
+
+    def _markov2_vote(self, r, min_support=8):
+        if len(r) < 8:
+            return None
+        pattern = tuple(r[-2:])
+        follow = [r[i] for i in range(2, len(r)) if tuple(r[i-2:i]) == pattern]
+        if len(follow) < min_support:
+            return None
+        return self._beta_p(follow.count("TAI"), len(follow)), len(follow)
+
+    def _streak_vote(self, r, min_support=6):
+        if len(r) < 6:
+            return None
+        cur = r[-1]
+        sl = 1
         for x in reversed(r[:-1]):
-            if x == last:
-                s += 1
+            if x == cur:
+                sl += 1
             else:
                 break
-        
-        candidates = []
-        
-        for plen in [3, 4, 5, 6]:
-            if n >= plen:
-                pat = tuple(r[-plen:])
-                if pat in self.pattern_memory and self.pattern_total[pat] >= 3:
-                    data = self.pattern_memory[pat]
-                    total = self.pattern_total[pat]
-                    for side in ('TAI', 'XIU'):
-                        count = data.get(side, 0)
-                        rate = count / total if total > 0 else 0
-                        if rate >= 0.58 and count >= 2:
-                            conf = min(0.90, 0.55 + rate * 0.35)
-                            candidates.append((side, conf, f"Mẫu {plen} ({count}/{total})"))
-        
-        if s in self.streak_memory:
-            data = self.streak_memory[s]
-            theo, be = data["THEO"], data["BE"]
-            total = theo + be
-            if total >= 3:
-                theo_rate = theo / total
-                be_rate = be / total
-                if be_rate >= 0.60:
-                    pred = 'XIU' if last == 'TAI' else 'TAI'
-                    candidates.append((pred, min(0.88, 0.55 + be_rate * 0.30), f"Bẻ bệt {s}"))
-                elif theo_rate >= 0.60:
-                    candidates.append((last, min(0.78, 0.55 + theo_rate * 0.30), f"Theo bệt {s}"))
-        
-        if n >= 20:
-            try:
-                avg = statistics.mean(s_list[-30:]) if len(s_list) >= 30 else statistics.mean(s_list)
-                std = statistics.stdev(s_list[-30:]) if len(s_list) >= 5 else 3.0
-                if std > 0:
-                    z = (last_sum - avg) / std
-                    if z >= 2.2:
-                        candidates.append(('XIU', 0.85, f"Z={z:.1f} cao"))
-                    elif z <= -2.2:
-                        candidates.append(('TAI', 0.85, f"Z={z:.1f} thấp"))
-            except:
-                pass
-        
-        if candidates:
-            candidates.sort(key=lambda x: x[1], reverse=True)
-            best = candidates[0]
-            return best[0], best[1], best[2]
-        
-        r20 = r[-20:]
-        t_cnt = r20.count('TAI')
-        x_cnt = r20.count('XIU')
-        if t_cnt > x_cnt:
-            return "TAI", 0.58, f"Xu hướng TÀI"
-        else:
-            return "XIU", 0.58, f"Xu hướng XỈU"
+        samples = []
+        i, n = 0, len(r)
+        while i < n - 1:
+            if r[i] == cur:
+                j = i
+                while j < n - 1 and r[j] == cur:
+                    j += 1
+                if (j - i) >= sl and j < n:
+                    samples.append(r[j])
+                i = j
+            else:
+                i += 1
+        if len(samples) < min_support:
+            return None
+        return self._beta_p(samples.count("TAI"), len(samples)), len(samples)
+
+    def predict(self, history):
+        r = self.clean(history)
+        n = len(r)
+        if n < 30:
+            return None, 0, f"Thiếu dữ liệu ({n}/30 phiên)"
+
+        votes = []
+        for length, w in ((2, 1.0), (3, 1.2), (4, 1.4), (5, 1.5)):
+            v = self._pattern_vote(r, length)
+            if v:
+                p, sup = v
+                edge = abs(p - 0.5)
+                if edge >= 0.10:
+                    votes.append(("TAI" if p > 0.5 else "XIU", w * sup * edge, p, f"P{length}x{sup}"))
+
+        v = self._markov2_vote(r)
+        if v:
+            p, sup = v
+            edge = abs(p - 0.5)
+            if edge >= 0.10:
+                votes.append(("TAI" if p > 0.5 else "XIU", 1.3 * sup * edge, p, f"MK2x{sup}"))
+
+        v = self._streak_vote(r)
+        if v:
+            p, sup = v
+            edge = abs(p - 0.5)
+            if edge >= 0.10:
+                votes.append(("TAI" if p > 0.5 else "XIU", 1.0 * sup * edge, p, f"STx{sup}"))
+
+        if not votes:
+            return None, 0, "Không có mẫu đủ mạnh"
+
+        w_tai = sum(w for s, w, *_ in votes if s == "TAI")
+        w_xiu = sum(w for s, w, *_ in votes if s == "XIU")
+        total_w = w_tai + w_xiu
+        if total_w <= 0:
+            return None, 0, "Trọng số rỗng"
+
+        ratio_tai, ratio_xiu = w_tai / total_w, w_xiu / total_w
+        side, ratio = ("TAI", ratio_tai) if ratio_tai >= ratio_xiu else ("XIU", ratio_xiu)
+
+        if ratio < 0.65:
+            return None, 0, f"Tín hiệu phân tán ({ratio:.0%})"
+
+        detail = ", ".join(tag for _, _, _, tag in votes[:3])
+        return side, ratio, f"Đồng thuận {ratio:.0%} • {detail}"
 
     def update(self, pred, actual):
-        if pred is None:
-            return
-        self.perf.append(1 if pred == actual else 0)
+        p, a = self.normalize(pred), self.normalize(actual)
+        if p and a:
+            self.perf.append(int(p == a))
 
-_brain = RealBrain()
+_md5_brain = RealBrain()
+_hu_brain = RealBrain()
 
-def feed_history(history):
-    _brain.push(history)
-
-def pro_predict(history, **kw):
-    return _brain.predict(history)
-
-def update_result(pred, actual, **kw):
-    _brain.update(pred, actual)
+def feed_history(_): return None
+def pro_predict(h, **kw): return _md5_brain.predict(h)
+def update_result(p, a, **kw): _md5_brain.update(p, a)
+def hu_pro_predict(h): return _hu_brain.predict(h)
+def hu_update_result(p, a): _hu_brain.update(p, a)
 
 # ==========================================
-# 🛡️ XÁC THỰC & TIỆN ÍCH
+# 🎲 HŨ SHARED HISTORY
+# ==========================================
+_hu_history_lock = threading.Lock()
+_hu_recent_fps = deque(maxlen=50)
+
+def _load_hu_history():
+    try:
+        with open(HU_HISTORY_DB_PATH, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        if not isinstance(raw, list):
+            return deque(maxlen=MAX_HISTORY_STORE)
+        clean = []
+        for row in raw[-MAX_HISTORY_STORE:]:
+            if not isinstance(row, dict):
+                continue
+            result = str(row.get("result", "")).upper()
+            dices = row.get("dice") or row.get("dices") or []
+            if result not in ("TAI", "XIU") or not isinstance(dices, list) or len(dices) != 3:
+                continue
+            try:
+                dices = [int(x) for x in dices]
+            except Exception:
+                continue
+            clean.append({
+                "session": row.get("session"), "dice": dices,
+                "total": int(row.get("total", sum(dices))),
+                "result": result, "time": row.get("time")
+            })
+        return deque(clean, maxlen=MAX_HISTORY_STORE)
+    except Exception:
+        return deque(maxlen=MAX_HISTORY_STORE)
+
+def _save_hu_history():
+    try:
+        tmp = HU_HISTORY_DB_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(list(hu_shared_history), f, ensure_ascii=False)
+        os.replace(tmp, HU_HISTORY_DB_PATH)
+    except Exception as exc:
+        logger.warning("Lưu Hũ lỗi: %s", exc)
+
+hu_shared_history = _load_hu_history()
+
+# ==========================================
+# STATE (PARALLEL)
 # ==========================================
 def init_user_state(chat_id):
     if chat_id not in user_states:
         user_states[chat_id] = {
-            "raw_hist": [], "history": [], "points_history": [],
-            "auto_bet_enabled": False, "prediction_enabled": False, "bet_amount": 10000,
-            "base_bet": 10000,
-            "martingale_enabled": False,
-            "martingale_level": 0,
-            "current_prediction": None, "waiting_for_result": False,
-            "has_bet_this_session": False, "session_id": None, "balance": 0,
-            "win_streak": 0, "lose_streak": 0, "total_win": 0, "total_lose": 0,
-            "last_pred_msg_id": None, "last_bet_amount": 10000, "current_conf": 50, "current_reason": ""
+            # ===== MD5 =====
+            "md5_raw_hist": [], "md5_history": [],
+            "md5_enabled": False,           # prediction_enabled
+            "md5_auto_bet": False,          # auto_bet_enabled
+            "md5_bet_amount": 10000, "md5_base_bet": 10000,
+            "md5_martingale_enabled": False, "md5_martingale_level": 0,
+            "md5_current_prediction": None,
+            "md5_has_bet_this_session": False,
+            "md5_session_id": None,
+            "md5_round_open": False,
+            "md5_synced": False,
+            "md5_last_subtick": None,
+            "md5_warmup_remaining": 0,
+            "md5_last_pred_msg_id": None,
+            "md5_last_bet_amount": 10000,
+            "md5_current_conf": 0, "md5_current_reason": "",
+            "md5_total_win": 0, "md5_total_lose": 0,
+            "md5_win_streak": 0, "md5_lose_streak": 0,
+            "md5_net_profit": 0, "md5_peak_profit": 0,
+            "md5_ready_notified": False,
+            # ===== HŨ =====
+            "hu_enabled": False,
+            "hu_auto_bet": False,           # giữ cho tương thích, luôn True khi bật
+            "hu_connected": False,
+            "hu_synced": False,
+            "hu_round_open": False,
+            "hu_session_id": None,
+            "hu_last_subtick": None,
+            "hu_current_prediction": None,
+            "hu_current_conf": 0, "hu_current_reason": "",
+            "hu_last_pred_msg_id": None,
+            "hu_bet_amount": 10000, "hu_base_bet": 10000,
+            "hu_has_bet_this_session": False,
+            "hu_last_bet_amount": 10000,
+            "hu_martingale_enabled": False, "hu_martingale_level": 0,
+            "hu_warmup_remaining": 0,
+            "hu_total_win": 0, "hu_total_lose": 0,
+            "hu_win_streak": 0, "hu_lose_streak": 0,
+            "hu_net_profit": 0, "hu_peak_profit": 0,
+            "hu_ready_notified": False,
+            # ===== CHUNG =====
+            "balance": 0,
+            "game_token": None,
         }
+    return user_states[chat_id]
 
-def parse_lines(data):
+def _parse_lines(data):
     if not data or not isinstance(data.get("list"), list):
         return []
     arr = sorted(data["list"], key=lambda x: x["id"])
@@ -317,20 +398,73 @@ def parse_lines(data):
             out.append({"session": it["id"], "dice": it["dices"], "total": p, "result": r})
     return out
 
-def fetch_history_from_api(limit=60):
-    for url in (HISTORY_API_URL, API_URL_FALLBACK):
+def fetch_md5_history(limit=60):
+    for url in (MD5_HISTORY_API_URL, MD5_API_URL_FALLBACK):
         try:
-            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0", "Origin": "https://lc79b.bet"}, timeout=10)
+            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0", "Origin": MD5_ORIGIN}, timeout=10)
             if r.status_code != 200:
                 continue
-            d = r.json()
-            arr = parse_lines(d)
+            arr = _parse_lines(r.json())
             if arr:
                 return arr[-limit:]
         except Exception:
             continue
     return []
 
+def _hu_result_from_payload(data):
+    if not isinstance(data, dict):
+        return None
+    dices = data.get("dices") or []
+    if not isinstance(dices, (list, tuple)) or len(dices) != 3:
+        return None
+    try:
+        dices = [int(x) for x in dices]
+    except Exception:
+        return None
+    total = sum(dices)
+    result = str(data.get("resultTruyenThong") or "").upper()
+    if result not in ("TAI", "XIU"):
+        result = "TAI" if total > 10 else "XIU"
+    return {
+        "session": data.get("id") or data.get("sessionId") or data.get("session"),
+        "dice": dices, "total": total, "result": result,
+        "time": datetime.now(ICT).strftime("%d/%m/%Y %H:%M:%S"),
+    }
+
+def _append_hu_shared_history(rec):
+    if not rec:
+        return False
+    now = time.time()
+    session = rec.get("session")
+    fp = ("session", str(session)) if session is not None else ("result", tuple(rec.get("dice", [])), rec.get("result"))
+    with _hu_history_lock:
+        if session is not None:
+            if any(str(x.get("session")) == str(session) for x in reversed(hu_shared_history)):
+                return False
+        else:
+            for old_fp, ts in list(_hu_recent_fps):
+                if old_fp == fp and now - ts < 8:
+                    return False
+        _hu_recent_fps.append((fp, now))
+        hu_shared_history.append(rec)
+        _save_hu_history()
+        return True
+
+def _hu_history_text(limit=20):
+    rows = list(hu_shared_history)[-max(1, min(int(limit), 50)):]
+    if not rows:
+        return "📭 Chưa có lịch sử Hũ."
+    lines = ["🎲 *LỊCH SỬ HŨ REALTIME*", "━━━━━━━━━━━━━━━━━━━━"]
+    for row in reversed(rows):
+        sid = row.get("session") or "?"
+        d = row.get("dice") or [0, 0, 0]
+        lines.append(f"#{sid} • *{row.get('result','?')}* • `{d[0]}-{d[1]}-{d[2]}={row.get('total',0)}`")
+    lines += ["━━━━━━━━━━━━━━━━━━━━", f"Đã lưu: `{len(hu_shared_history)}/{MAX_HISTORY_STORE}`"]
+    return "\n".join(lines)
+
+# ==========================================
+# AUTH
+# ==========================================
 def check_auth(chat_id):
     if chat_id == ADMIN_ID:
         return True
@@ -340,26 +474,30 @@ def check_auth(chat_id):
         else:
             del authorized_users[chat_id]
             try:
-                bot.send_message(chat_id, "⚠️ **KEY CỦA MÀY HẾT HẠN RỒI NHÓC MUA MỚI ĐÊ!!!**", parse_mode="Markdown")
+                bot.send_message(chat_id, "⚠️ **KEY HẾT HẠN!!!**", parse_mode="Markdown")
             except:
                 pass
-            if chat_id in active_sockets:
-                try:
-                    active_sockets[chat_id].disconnect()
-                except:
-                    pass
-                del active_sockets[chat_id]
+            for sock_dict in (active_sockets, hu_sockets):
+                if chat_id in sock_dict:
+                    try:
+                        sock_dict[chat_id].disconnect()
+                    except Exception:
+                        pass
+                    del sock_dict[chat_id]
             if chat_id in user_states:
-                user_states[chat_id]["auto_bet_enabled"] = False
+                st = user_states[chat_id]
+                st["md5_auto_bet"] = False
+                st["md5_enabled"] = False
+                st["hu_enabled"] = False
     return False
 
 def require_auth(fn):
     def wr(m, *a, **kw):
         if not SYSTEM_ACTIVE and m.chat.id != ADMIN_ID:
-            safe_send_and_clean(m.chat.id, "🔴 **Hệ thống LCVIP đang tạm tắt bởi Admin!**", delay=5)
+            safe_send_and_clean(m.chat.id, "🔴 **Hệ thống đang tắt!**", delay=5)
             return
         if not check_auth(m.chat.id):
-            safe_send_and_clean(m.chat.id, f"🔒 **Chưa kích hoạt LCVIP!**\n🔑 Nhập key: `/nhapkey MÃ`\n📩 Liên hệ mua key: {ADMIN_USERNAME}", delay=6)
+            safe_send_and_clean(m.chat.id, f"🔒 **Chưa kích hoạt!**\n🔑 `/nhapkey MÃ`\n📩 {ADMIN_USERNAME}", delay=6)
             return
         return fn(m, *a, **kw)
     return wr
@@ -371,36 +509,68 @@ def format_expire_time(ts):
     d = int(r // 86400)
     h = int((r % 86400) // 3600)
     m = int((r % 3600) // 60)
-    if d > 0:
-        return f"{d}n {h}g {m}p"
-    return f"{h}g {m}p"
-
-def tinh_tien_cuoc(cid):
-    st = user_states[cid]
-    if not st["martingale_enabled"]:
-        return st["bet_amount"]
-    lv = st["martingale_level"]
-    if lv <= 0:
-        return st["base_bet"]
-    return min(st["base_bet"] * (MARTINGALE_MULTIPLIER ** lv), st["base_bet"] * (MARTINGALE_MULTIPLIER ** MAX_MARTINGALE_LEVEL))
-
-def ai_tu_hoc(cid, du_doan, thuc_te):
-    st = user_states[cid]
-    update_result(du_doan, thuc_te)
-    if du_doan == thuc_te:
-        st["win_streak"] += 1
-        st["lose_streak"] = 0
-        st["total_win"] += 1
-        st["martingale_level"] = 0
-    else:
-        st["lose_streak"] += 1
-        st["win_streak"] = 0
-        st["total_lose"] += 1
-        if st["martingale_enabled"] and st["martingale_level"] < MAX_MARTINGALE_LEVEL:
-            st["martingale_level"] += 1
+    return f"{d}n {h}g {m}p" if d > 0 else f"{h}g {m}p"
 
 # ==========================================
-# 🌐 LOGIN + SOCKET
+# TÍNH TIỀN CƯỢC (GENERIC)
+# ==========================================
+def _tinh_tien_cuoc(st, prefix, max_level, multiplier, min_bet):
+    base = max(min_bet, int(st.get(f"{prefix}_base_bet", min_bet)))
+    if not st.get(f"{prefix}_martingale_enabled"):
+        amount = base
+    else:
+        lv = max(0, min(int(st.get(f"{prefix}_martingale_level", 0)), max_level))
+        amount = base * (multiplier ** lv)
+    bal = int(st.get("balance", 0) or 0)
+    if bal > 0:
+        amount = min(amount, bal)
+    if amount < min_bet:
+        amount = min_bet if bal >= min_bet else bal
+    return int(amount)
+
+def tinh_tien_cuoc_md5(cid):
+    return _tinh_tien_cuoc(user_states[cid], "md5", MAX_MARTINGALE_LEVEL, MARTINGALE_MULTIPLIER, MIN_BET)
+
+def tinh_tien_cuoc_hu(cid):
+    return _tinh_tien_cuoc(user_states[cid], "hu", MAX_MARTINGALE_LEVEL, MARTINGALE_MULTIPLIER, MIN_BET)
+
+# ==========================================
+# AI TỰ HỌC (GENERIC)
+# ==========================================
+def _ai_tu_hoc(st, prefix, pred, actual, bet_amount, max_level, game_label, cid):
+    bet_amount = int(bet_amount or 0)
+    if pred == actual:
+        st[f"{prefix}_win_streak"] += 1
+        st[f"{prefix}_lose_streak"] = 0
+        st[f"{prefix}_total_win"] += 1
+        st[f"{prefix}_net_profit"] = int(st.get(f"{prefix}_net_profit", 0)) + bet_amount
+        st[f"{prefix}_martingale_level"] = 0
+    else:
+        st[f"{prefix}_lose_streak"] += 1
+        st[f"{prefix}_win_streak"] = 0
+        st[f"{prefix}_total_lose"] += 1
+        st[f"{prefix}_net_profit"] = int(st.get(f"{prefix}_net_profit", 0)) - bet_amount
+        if st.get(f"{prefix}_martingale_enabled") and st.get(f"{prefix}_martingale_level", 0) < max_level:
+            st[f"{prefix}_martingale_level"] += 1
+        if st.get(f"{prefix}_martingale_level", 0) >= max_level and st.get(f"{prefix}_martingale_enabled"):
+            st[f"{prefix}_martingale_enabled"] = False
+            try:
+                bot.send_message(cid, f"🛑 *{game_label}: Chạm cấp X2 tối đa và vẫn thua — TỰ ĐỘNG TẮT X2.*", parse_mode="Markdown")
+            except Exception:
+                pass
+    if st[f"{prefix}_net_profit"] > st.get(f"{prefix}_peak_profit", 0):
+        st[f"{prefix}_peak_profit"] = st[f"{prefix}_net_profit"]
+
+def ai_tu_hoc_md5(cid, pred, actual, bet_amount=0):
+    _ai_tu_hoc(user_states[cid], "md5", pred, actual, bet_amount, MAX_MARTINGALE_LEVEL, "MD5", cid)
+    _md5_brain.update(pred, actual)
+
+def ai_tu_hoc_hu(cid, pred, actual, bet_amount=0):
+    _ai_tu_hoc(user_states[cid], "hu", pred, actual, bet_amount, MAX_MARTINGALE_LEVEL, "Hũ", cid)
+    _hu_brain.update(pred, actual)
+
+# ==========================================
+# LOGIN
 # ==========================================
 def md5_hash(t):
     return hashlib.md5(t.encode()).hexdigest()
@@ -420,7 +590,10 @@ def login_and_get_token(u, p):
     except Exception as e:
         return {"_error": str(e)}
 
-def start_websocket(cid, token, username=""):
+# ==========================================
+# 🌐 MD5 SOCKET (SONG SONG VỚI HŨ)
+# ==========================================
+def start_md5_websocket(cid, token):
     if cid in active_sockets:
         try:
             active_sockets[cid].disconnect()
@@ -428,190 +601,472 @@ def start_websocket(cid, token, username=""):
             pass
     sio = socketio.Client(reconnection=True, reconnection_attempts=99999, reconnection_delay=3, logger=False, engineio_logger=False)
     active_sockets[cid] = sio
-    init_user_state(cid)
+    st = init_user_state(cid)
 
-    @sio.event(namespace='/txmd5')
+    @sio.event(namespace=MD5_NAMESPACE)
     def connect():
-        arr = fetch_history_from_api(60)
-        st = user_states[cid]
+        st["md5_synced"] = True
+        arr = fetch_md5_history(60)
         if arr:
-            st["raw_hist"] = arr
-            st["history"] = [x["result"] for x in arr]
-            st["points_history"] = [x["total"] for x in arr]
-            feed_history(arr)
-            # Kết nối nền im lặng cho tới khi người dùng bật bằng lệnh.
+            st["md5_raw_hist"] = arr
+            st["md5_history"] = [x["result"] for x in arr]
 
-    @sio.on('new-session', namespace='/txmd5')
-    def new_sess(d):
-        if not check_auth(cid):
+    @sio.event(namespace=MD5_NAMESPACE)
+    def disconnect():
+        st["md5_synced"] = False
+
+    @sio.on("connect_error", namespace=MD5_NAMESPACE)
+    def connect_error(data):
+        st["md5_synced"] = False
+        if st.get("md5_enabled") and "Unauthorized" in str(data):
+            safe_send_and_clean(cid, "⚠️ MD5: token phiên hết hạn. `/login` lại.", delay=6)
+
+    @sio.on("bet-result", namespace=MD5_NAMESPACE)
+    def md5_bet_result(data):
+        if not isinstance(data, dict):
+            return
+        new_bal = data.get("postBalance") or data.get("balance") or data.get("money")
+        if new_bal is not None:
             try:
-                sio.disconnect()
-            except:
+                st["balance"] = int(new_bal)
+            except Exception:
                 pass
+        err = data.get("error") or data.get("message")
+        if err and st.get("md5_enabled"):
+            safe_send_and_clean(cid, f"⚠️ MD5 • Lỗi cược: `{err}`", delay=8)
+
+    @sio.on("tick-update", namespace=MD5_NAMESPACE)
+    def md5_tick(data):
+        if not check_auth(cid) or not st.get("md5_enabled") or not isinstance(data, dict):
+            return
+        state = str(data.get("state") or "").upper()
+        sub_tick = data.get("subTick")
+        st["md5_last_subtick"] = sub_tick
+
+        if state != "BETTING" or not st.get("md5_synced") or st.get("md5_round_open"):
             return
 
-        st = user_states[cid]
-        st["session_id"] = d.get("id")
-        st["has_bet_this_session"] = False
-        st["current_prediction"] = None
-        st["last_pred_msg_id"] = None
-        if not st.get("prediction_enabled", False):
-            return
-        result = pro_predict(st["raw_hist"]) if st["raw_hist"] else None
-        if result and result[0]:
-            st["current_prediction"] = result[0]
-            st["current_conf"] = int(result[1] * 100)
-            st["current_reason"] = result[2] if len(result) > 2 else ""
-            tien = tinh_tien_cuoc(cid)
-            x2_st = f"Cấp {st['martingale_level']}" if st["martingale_enabled"] else "Tắt"
-            auto_st = "🟢 BẬT" if st["auto_bet_enabled"] else "🔴 TẮT"
-            
+        st["md5_round_open"] = True
+        st["md5_session_id"] = data.get("id") or data.get("sessionId") or data.get("session")
+        st["md5_current_prediction"] = None
+        st["md5_has_bet_this_session"] = False
+        st["md5_last_pred_msg_id"] = None
+
+        # ===== WARMUP =====
+        if st.get("md5_warmup_remaining", 0) > 0:
+            done = WARMUP_SESSIONS - st["md5_warmup_remaining"]
             msg = (
-                f"👑 *LCVIP BY ONGCHUSUNWIN* 👑\n"
+                f"⏳ *MD5 • TÍCH LŨY DỮ LIỆU*\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"🎲 *PHIÊN*  `#{st['session_id']}`\n"
-                f"🎯 *DỰ ĐOÁN*  {'🟢' if result[0] == 'TAI' else '🔴'} *{result[0]}*\n"
-                f"📈 *Tín hiệu thuật toán:* `{st['current_conf']}%`\n"
-                f"🧠 *Phân tích:* _{st['current_reason']}_\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"💵 *Cược dự kiến:* `{tien:,}đ`\n"
-                f"⚡ *Auto:* {auto_st}   |   🔁 *X2:* `{x2_st}`\n"
-                f"📡 *Trạng thái:* ⏳ Chờ xác nhận cược\n"
+                f"🎯 *PHIÊN* `{st['md5_session_id'] or '?'}`\n"
+                f"📊 *Tiến độ:* `{done + 1}/{WARMUP_SESSIONS}`\n"
+                f"💤 Chưa dự đoán — đang hiệu chỉnh mẫu MD5\n"
                 f"━━━━━━━━━━━━━━━━━━━━"
             )
-            sent_msg = safe_send_and_clean(cid, msg, delay=0)
-            if sent_msg:
-                st["last_pred_msg_id"] = sent_msg.message_id
+            sent = safe_send_and_clean(cid, msg, delay=0)
+            if sent:
+                st["md5_last_pred_msg_id"] = sent.message_id
+            return
 
-    @sio.on('tick-update', namespace='/txmd5')
-    def tk(d):
+        # ===== PREDICT =====
+        hist = st["md5_raw_hist"]
+        if len(hist) < MIN_HISTORY:
+            return
+        pred = pro_predict(hist)
+        if not pred or not pred[0]:
+            return
+
+        side, conf, reason = pred[0], int(pred[1] * 100), pred[2]
+        st["md5_current_prediction"] = side
+        st["md5_current_conf"] = conf
+        st["md5_current_reason"] = reason
+
+        # ===== BET =====
+        bet_amount = tinh_tien_cuoc_md5(cid)
+        balance = int(st.get("balance", 0) or 0)
+        if balance < bet_amount:
+            bet_amount = balance if balance >= MIN_BET else 0
+
+        if bet_amount > 0 and st.get("md5_auto_bet"):
+            try:
+                sio.emit("bet", {"type": side, "amount": bet_amount}, namespace=MD5_NAMESPACE)
+                st["md5_has_bet_this_session"] = True
+                st["md5_last_bet_amount"] = bet_amount
+            except Exception as exc:
+                logger.warning("MD5 emit bet lỗi: %s", exc)
+
+        # ===== CARD =====
+        x2_st = f"Cấp {st['md5_martingale_level']}" if st.get("md5_martingale_enabled") else "Tắt"
+        if bet_amount == 0:
+            bet_line = "⚠️ *SỐ DƯ KHÔNG ĐỦ* — bỏ qua phiên này"
+        elif st["md5_has_bet_this_session"]:
+            bet_line = f"💵 *ĐÃ GỬI CƯỢC:* `{bet_amount:,}đ`"
+        else:
+            bet_line = "⚪ *Chưa gửi cược*"
+
+        sid = st.get("md5_session_id") or "?"
+        msg = (
+            f"⚡ *LCVIP • MD5 MD5*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎯 *DỰ ĐOÁN:* {'🟢' if side == 'TAI' else '🔴'} *{side}*\n"
+            f"📈 *Đồng thuận mẫu:* `{conf}%`\n"
+            f"🧠 _{reason}_\n"
+            f"⏱ *Còn:* `{sub_tick if sub_tick is not None else '?'}s` • Phiên `{sid}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"{bet_line}\n"
+            f"🔁 *X2:* `{x2_st}`\n"
+            f"🏦 *Số dư:* `{st.get('balance',0):,}đ`\n"
+            f"━━━━━━━━━━━━━━━━━━━━"
+        )
+        sent = safe_send_and_clean(cid, msg, delay=0)
+        if sent:
+            st["md5_last_pred_msg_id"] = sent.message_id
+
+    @sio.on("session-result", namespace=MD5_NAMESPACE)
+    def md5_result(data):
         if not check_auth(cid):
             return
-        st = user_states[cid]
-        if d.get("state") == "BETTING" and st.get("prediction_enabled", False) and st["auto_bet_enabled"] and st["current_prediction"] and AUTO_BET_RUN_UNTIL_STOP:
-            if not st["has_bet_this_session"]:
-                tien = tinh_tien_cuoc(cid)
-                st["last_bet_amount"] = tien
-                sio.emit("bet", {"type": st["current_prediction"], "amount": tien}, namespace="/txmd5")
-                st["has_bet_this_session"] = True
-                x2_st = f"Cấp {st['martingale_level']}" if st["martingale_enabled"] else "Tắt"
-                
-                if st.get("last_pred_msg_id"):
-                    try:
-                        edited_text = (
-                            f"👑 *LCVIP BY ONGCHUSUNWIN* 👑\n"
-                            f"━━━━━━━━━━━━━━━━━━━━\n"
-                            f"🎲 *PHIÊN*  `#{st['session_id']}`\n"
-                            f"🎯 *DỰ ĐOÁN*  {'🟢' if st['current_prediction'] == 'TAI' else '🔴'} *{st['current_prediction']}*\n"
-                            f"📈 *Tín hiệu thuật toán:* `{st['current_conf']}%`\n"
-                            f"━━━━━━━━━━━━━━━━━━━━\n"
-                            f"💵 *Tiền cược yêu cầu:* `{tien:,}đ`\n"
-                            f"🔁 *X2:* `{x2_st}`\n"
-                            f"📡 *Trạng thái:* 🟡 Đã gửi lệnh cược, chờ xác nhận\n"
-                            f"━━━━━━━━━━━━━━━━━━━━"
-                        )
-                        bot.edit_message_text(edited_text, cid, st["last_pred_msg_id"], parse_mode="Markdown")
-                    except Exception:
-                        pass
+        res = data.get("resultTruyenThong")
+        st["md5_synced"] = True
+        st["md5_round_open"] = False
 
-    @sio.on('bet-result', namespace='/txmd5')
-    def br(d):
-        st = user_states[cid]
-        if "postBalance" in d:
-            st["balance"] = d["postBalance"]
-
-    @sio.on('session-result', namespace='/txmd5')
-    def sr(d):
-        res = d.get("resultTruyenThong")
-        st = user_states[cid]
-        if not st.get("prediction_enabled", False):
+        if res not in ("TAI", "XIU"):
             return
-        sess_id = d.get("id") or (st.get("session_id") if st.get("session_id") else "LCVIP")
-        
-        if res in ("TAI", "XIU"):
-            dices = d.get("dices", [0, 0, 0])
-            total_pts = sum(dices) if dices else 0
-            dice_str = f"{dices[0]}-{dices[1]}-{dices[2]}" if len(dices) == 3 else "N/A"
-            
-            rec = {"session": sess_id, "dice": dices, "total": total_pts, "result": res}
-            st["raw_hist"].append(rec)
-            st["history"].append(res)
-            st["points_history"].append(total_pts)
-            if len(st["raw_hist"]) > MAX_HISTORY_STORE:
-                st["raw_hist"].pop(0)
-                st["history"].pop(0)
-                st["points_history"].pop(0)
-            feed_history([rec])
-            
-            pred = st["current_prediction"]
-            has_bet = st.get("has_bet_this_session", False)
-            bet_amt = st.get("last_bet_amount", 10000)
-            
-            if not has_bet:
-                if st.get("last_pred_msg_id"):
-                    try:
-                        final_text = (
-                            f"👑 *LCVIP BY ONGCHUSUNWIN* 👑\n"
-                            f"━━━━━━━━━━━━━━━━━━━━\n"
-                            f"🎲 *PHIÊN*  `#{sess_id}`\n"
-                            f"🎯 *DỰ ĐOÁN*  *{pred or 'KHÔNG CÓ'}*\n"
-                            f"🎲 *KẾT QUẢ*  *{res}* • `{dice_str}` = `{total_pts}`\n"
-                            f"⚪ *CHƯA CƯỢC* • Không tính lãi/lỗ\n"
-                            f"💰 *Số dư:* `{st['balance']:,}đ`\n"
-                            f"━━━━━━━━━━━━━━━━━━━━"
-                        )
-                        bot.edit_message_text(final_text, cid, st["last_pred_msg_id"], parse_mode="Markdown")
-                    except Exception:
-                        pass
-                return
 
-            is_win = (pred == res)
-            profit = bet_amt if is_win else -bet_amt
-            ai_tu_hoc(cid, pred, res)
-            
-            global_session_logs.append({
-                "time": datetime.now(ICT).strftime("%d/%m/%Y %H:%M:%S"),
-                "session": sess_id,
-                "dice": dices,
-                "total": total_pts,
-                "result": res,
-                "prediction": pred,
-                "status": "THẮNG" if is_win else "THUA",
-                "profit": profit,
-                "balance": st["balance"]
-            })
-            
-            if st.get("last_pred_msg_id"):
+        dices = data.get("dices", [0, 0, 0])
+        total_pts = sum(dices) if dices else 0
+        sess_id = data.get("id") or st.get("md5_session_id") or "MD5"
+
+        rec = {"session": sess_id, "dice": dices, "total": total_pts, "result": res}
+        st["md5_raw_hist"].append(rec)
+        st["md5_history"].append(res)
+        if len(st["md5_raw_hist"]) > MAX_HISTORY_STORE:
+            st["md5_raw_hist"].pop(0)
+            st["md5_history"].pop(0)
+
+        # Ready notification
+        if st.get("md5_enabled") and len(st["md5_raw_hist"]) >= MIN_HISTORY and not st.get("md5_ready_notified"):
+            st["md5_ready_notified"] = True
+            safe_send_and_clean(cid, f"✅ *MD5 đủ dữ liệu:* `{len(st['md5_raw_hist'])}` phiên.", delay=8)
+
+        pred = st.get("md5_current_prediction")
+
+        # ===== WARMUP RESULT =====
+        if st.get("md5_warmup_remaining", 0) > 0:
+            st["md5_warmup_remaining"] -= 1
+            done = WARMUP_SESSIONS - st["md5_warmup_remaining"]
+            if st.get("md5_last_pred_msg_id"):
                 try:
-                    tt_icon = "🟢 THẮNG KHỦNG" if is_win else "🔴 THUA CƯỢC"
-                    lai_lo_str = f"+{bet_amt:,}" if is_win else f"-{bet_amt:,}"
-                    final_text = (
-                        f"👑 *LCVIP BY ONGCHUSUNWIN* 👑\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n"
-                        f"🎲 *PHIÊN*  `#{sess_id}`\n"
-                        f"🎯 *DỰ ĐOÁN*  *{pred}*  ➜  *{res}*\n"
-                        f"🎲 *Xúc xắc:* `{dice_str}` = `{total_pts}` điểm\n"
-                        f"{'✅ *HÚP*' if is_win else '❌ *GÃY*'}\n"
-                        f"💵 *Cược yêu cầu:* `{bet_amt:,}đ`\n"
-                        f"💰 *Lãi/lỗ ước tính:* `{lai_lo_str}đ`\n"
-                        f"🏦 *Số dư:* `{st['balance']:,}đ`\n"
-                        f"━━━━━━━━━━━━━━━━━━━━"
-                    )
-                    bot.edit_message_text(final_text, cid, st["last_pred_msg_id"], parse_mode="Markdown")
-                    # Giữ card kết quả trong lịch sử Telegram; không tự xóa.
+                    if st["md5_warmup_remaining"] > 0:
+                        txt = (
+                            f"✅ *MD5 • Tích lũy*\n"
+                            f"🎲 `#{sess_id}` • *{res}* • `{dices[0]}-{dices[1]}-{dices[2]}={total_pts}`\n"
+                            f"📊 Tiến độ: `{done}/{WARMUP_SESSIONS}`"
+                        )
+                    else:
+                        txt = (
+                            f"🎉 *HOÀN TẤT TÍCH LŨY MD5!*\n"
+                            f"🎲 `#{sess_id}` • *{res}* • `{dices[0]}-{dices[1]}-{dices[2]}={total_pts}`\n"
+                            f"🚀 Bắt đầu dự đoán + cược từ phiên tới!"
+                        )
+                    bot.edit_message_text(txt, cid, st["md5_last_pred_msg_id"], parse_mode="Markdown")
                 except Exception:
                     pass
+            return
+        # =========================
+
+        if pred not in ("TAI", "XIU"):
+            return
+
+        has_bet = bool(st.get("md5_has_bet_this_session"))
+        bet_amount = int(st.get("md5_last_bet_amount", 0) or 0)
+        is_win = (pred == res)
+
+        profit = 0
+        if has_bet and bet_amount > 0:
+            ai_tu_hoc_md5(cid, pred, res, bet_amount=bet_amount)
+            profit = bet_amount if is_win else -bet_amount
+            global_session_logs.append({
+                "time": datetime.now(ICT).strftime("%d/%m/%Y %H:%M:%S"),
+                "game": "MD5", "session": sess_id, "dice": dices, "total": total_pts,
+                "result": res, "prediction": pred,
+                "status": "THẮNG" if is_win else "THUA",
+                "profit": profit, "balance": st.get("balance", 0)
+            })
+
+        if st.get("md5_last_pred_msg_id"):
+            try:
+                if has_bet and bet_amount > 0:
+                    status = (
+                        f"{'✅ HÚP' if is_win else '❌ GÃY'} | "
+                        f"💵 `{bet_amount:,}đ` → `{profit:+,}đ`\n"
+                        f"📊 Ròng MD5: `{st.get('md5_net_profit', 0):+,}đ`\n"
+                        f"🏦 Số dư: `{st.get('balance',0):,}đ`\n"
+                        f"🔥 `{st.get('md5_win_streak',0)}T/{st.get('md5_lose_streak',0)}B`"
+                    )
+                else:
+                    status = "⚪ Không cược phiên này"
+
+                final = (
+                    f"⚡ *MD5* • `#{sess_id}`\n"
+                    f"🎯 *{pred}* ➜ *{res}* • `{dices[0]}-{dices[1]}-{dices[2]}={total_pts}`\n"
+                    f"{status}"
+                )
+                bot.edit_message_text(final, cid, st["md5_last_pred_msg_id"], parse_mode="Markdown")
+            except Exception:
+                pass
+
+        st["md5_current_prediction"] = None
+        st["md5_has_bet_this_session"] = False
 
     try:
-        sio.connect("https://wtxmd52.tele68.com", socketio_path="txmd5/", namespaces=["/txmd5"],
+        sio.connect(MD5_SOCKET_URL, socketio_path=MD5_SOCKET_PATH, namespaces=[MD5_NAMESPACE],
                     transports=["websocket"], auth={"token": token},
-                    headers={"User-Agent": "Mozilla/5.0", "Origin": "https://lc79b.bet"})
+                    headers={"User-Agent": "Mozilla/5.0", "Origin": MD5_ORIGIN})
         sio.wait()
-    except Exception as e:
-        pass
+    except Exception as exc:
+        st["md5_synced"] = False
+        logger.warning("MD5 socket dừng cho %s: %s", cid, exc)
+    finally:
+        if active_sockets.get(cid) is sio:
+            active_sockets.pop(cid, None)
 
 # ==========================================
-# 🎮 LỆNH ĐIỀU KHIỂN BOT
+# 🎲 HŨ SOCKET (SONG SONG)
+# ==========================================
+def start_hu_websocket(cid, token):
+    if cid in hu_sockets:
+        try:
+            hu_sockets[cid].disconnect()
+        except Exception:
+            pass
+        hu_sockets.pop(cid, None)
+    sio = socketio.Client(reconnection=True, reconnection_attempts=99999, reconnection_delay=3, logger=False, engineio_logger=False)
+    hu_sockets[cid] = sio
+    st = init_user_state(cid)
+    st["hu_connected"] = False
+    st["hu_synced"] = False
+    st["hu_round_open"] = False
+
+    @sio.event(namespace=HU_SOCKET_NAMESPACE)
+    def connect():
+        st["hu_connected"] = True
+
+    @sio.event(namespace=HU_SOCKET_NAMESPACE)
+    def disconnect():
+        st["hu_connected"] = False
+
+    @sio.on("connect_error", namespace=HU_SOCKET_NAMESPACE)
+    def connect_error(data):
+        st["hu_connected"] = False
+        if st.get("hu_enabled") and "Unauthorized" in str(data):
+            safe_send_and_clean(cid, "⚠️ Hũ: token phiên hết hạn. `/login` lại.", delay=6)
+
+    @sio.on("bet-result", namespace=HU_SOCKET_NAMESPACE)
+    def hu_bet_result(data):
+        if not isinstance(data, dict):
+            return
+        new_bal = data.get("postBalance") or data.get("balance") or data.get("money")
+        if new_bal is not None:
+            try:
+                st["balance"] = int(new_bal)
+            except Exception:
+                pass
+        err = data.get("error") or data.get("message")
+        if err and st.get("hu_enabled"):
+            safe_send_and_clean(cid, f"⚠️ Hũ • Lỗi cược: `{err}`", delay=8)
+
+    @sio.on("tick-update", namespace=HU_SOCKET_NAMESPACE)
+    def hu_tick(data):
+        if not check_auth(cid) or not st.get("hu_enabled") or not isinstance(data, dict):
+            return
+        state = str(data.get("state") or "").upper()
+        sub_tick = data.get("subTick")
+        st["hu_last_subtick"] = sub_tick
+
+        if state != "BETTING" or not st.get("hu_synced") or st.get("hu_round_open"):
+            return
+
+        st["hu_round_open"] = True
+        st["hu_session_id"] = data.get("id") or data.get("sessionId") or data.get("session")
+        st["hu_current_prediction"] = None
+        st["hu_has_bet_this_session"] = False
+        st["hu_last_pred_msg_id"] = None
+
+        # ===== WARMUP =====
+        if st.get("hu_warmup_remaining", 0) > 0:
+            done = WARMUP_SESSIONS - st["hu_warmup_remaining"]
+            msg = (
+                f"⏳ *HŨ • TÍCH LŨY DỮ LIỆU*\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"🎯 *PHIÊN* `{st['hu_session_id'] or '?'}`\n"
+                f"📊 *Tiến độ:* `{done + 1}/{WARMUP_SESSIONS}`\n"
+                f"💤 Chưa dự đoán — đang hiệu chỉnh mẫu Hũ\n"
+                f"━━━━━━━━━━━━━━━━━━━━"
+            )
+            sent = safe_send_and_clean(cid, msg, delay=0)
+            if sent:
+                st["hu_last_pred_msg_id"] = sent.message_id
+            return
+
+        # ===== PREDICT =====
+        hist = list(hu_shared_history)
+        if len(hist) < MIN_HISTORY:
+            return
+        pred = hu_pro_predict(hist)
+        if not pred or not pred[0]:
+            return
+
+        side, conf, reason = pred[0], int(pred[1] * 100), pred[2]
+        st["hu_current_prediction"] = side
+        st["hu_current_conf"] = conf
+        st["hu_current_reason"] = reason
+
+        # ===== BET =====
+        bet_amount = tinh_tien_cuoc_hu(cid)
+        balance = int(st.get("balance", 0) or 0)
+        if balance < bet_amount:
+            bet_amount = balance if balance >= MIN_BET else 0
+
+        if bet_amount > 0:
+            try:
+                sio.emit("bet", {"type": side, "amount": bet_amount}, namespace=HU_SOCKET_NAMESPACE)
+                st["hu_has_bet_this_session"] = True
+                st["hu_last_bet_amount"] = bet_amount
+            except Exception as exc:
+                logger.warning("Hũ emit bet lỗi: %s", exc)
+
+        # ===== CARD =====
+        x2_st = f"Cấp {st['hu_martingale_level']}" if st.get("hu_martingale_enabled") else "Tắt"
+        if bet_amount == 0:
+            bet_line = "⚠️ *SỐ DƯ KHÔNG ĐỦ* — bỏ qua phiên này"
+        else:
+            bet_line = f"💵 *ĐÃ GỬI CƯỢC:* `{bet_amount:,}đ`"
+
+        sid = st.get("hu_session_id") or "?"
+        msg = (
+            f"🎲 *LCVIP • BÀN HŨ*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎯 *DỰ ĐOÁN:* {'🟢' if side == 'TAI' else '🔴'} *{side}*\n"
+            f"📈 *Đồng thuận mẫu:* `{conf}%`\n"
+            f"🧠 _{reason}_\n"
+            f"⏱ *Còn:* `{sub_tick if sub_tick is not None else '?'}s` • Phiên `{sid}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"{bet_line}\n"
+            f"🔁 *X2:* `{x2_st}`\n"
+            f"🏦 *Số dư:* `{st.get('balance',0):,}đ`\n"
+            f"━━━━━━━━━━━━━━━━━━━━"
+        )
+        sent = safe_send_and_clean(cid, msg, delay=0)
+        if sent:
+            st["hu_last_pred_msg_id"] = sent.message_id
+
+    @sio.on("session-result", namespace=HU_SOCKET_NAMESPACE)
+    def hu_result(data):
+        if not check_auth(cid):
+            return
+        rec = _hu_result_from_payload(data)
+        st["hu_synced"] = True
+        st["hu_round_open"] = False
+        if not rec:
+            return
+
+        _append_hu_shared_history(rec)
+        if rec.get("session") is not None:
+            st["hu_session_id"] = rec.get("session")
+
+        if st.get("hu_enabled") and len(hu_shared_history) >= MIN_HISTORY and not st.get("hu_ready_notified"):
+            st["hu_ready_notified"] = True
+            safe_send_and_clean(cid, f"✅ *Hũ đủ dữ liệu:* `{len(hu_shared_history)}` phiên.", delay=8)
+
+        pred = st.get("hu_current_prediction")
+
+        # ===== WARMUP RESULT =====
+        if st.get("hu_warmup_remaining", 0) > 0:
+            st["hu_warmup_remaining"] -= 1
+            done = WARMUP_SESSIONS - st["hu_warmup_remaining"]
+            if st.get("hu_last_pred_msg_id"):
+                try:
+                    if st["hu_warmup_remaining"] > 0:
+                        txt = (
+                            f"✅ *Hũ • Tích lũy*\n"
+                            f"🎲 `#{rec.get('session') or '?'}` • *{rec['result']}* • `{rec['dice'][0]}-{rec['dice'][1]}-{rec['dice'][2]}={rec['total']}`\n"
+                            f"📊 Tiến độ: `{done}/{WARMUP_SESSIONS}`"
+                        )
+                    else:
+                        txt = (
+                            f"🎉 *HOÀN TẤT TÍCH LŨY HŨ!*\n"
+                            f"🎲 `#{rec.get('session') or '?'}` • *{rec['result']}* • `{rec['dice'][0]}-{rec['dice'][1]}-{rec['dice'][2]}={rec['total']}`\n"
+                            f"🚀 Bắt đầu dự đoán + cược từ phiên tới!"
+                        )
+                    bot.edit_message_text(txt, cid, st["hu_last_pred_msg_id"], parse_mode="Markdown")
+                except Exception:
+                    pass
+            return
+        # =========================
+
+        if pred not in ("TAI", "XIU"):
+            return
+
+        actual = rec["result"]
+        dices = rec["dice"]
+        total = rec["total"]
+        sid = rec.get("session") or st.get("hu_session_id") or "HŨ"
+        bet_amount = int(st.get("hu_last_bet_amount", 0) or 0)
+        has_bet = bool(st.get("hu_has_bet_this_session"))
+        is_win = (pred == actual)
+
+        profit = 0
+        if has_bet and bet_amount > 0:
+            ai_tu_hoc_hu(cid, pred, actual, bet_amount=bet_amount)
+            profit = bet_amount if is_win else -bet_amount
+            global_session_logs.append({
+                "time": datetime.now(ICT).strftime("%d/%m/%Y %H:%M:%S"),
+                "game": "HU", "session": sid, "dice": dices, "total": total,
+                "result": actual, "prediction": pred,
+                "status": "THẮNG" if is_win else "THUA",
+                "profit": profit, "balance": st.get("balance", 0)
+            })
+
+        if st.get("hu_last_pred_msg_id"):
+            try:
+                if has_bet and bet_amount > 0:
+                    status = (
+                        f"{'✅ HÚP' if is_win else '❌ GÃY'} | "
+                        f"💵 `{bet_amount:,}đ` → `{profit:+,}đ`\n"
+                        f"📊 Ròng Hũ: `{st.get('hu_net_profit', 0):+,}đ`\n"
+                        f"🏦 Số dư: `{st.get('balance',0):,}đ`\n"
+                        f"🔥 `{st.get('hu_win_streak',0)}T/{st.get('hu_lose_streak',0)}B`"
+                    )
+                else:
+                    status = "⚪ Không cược phiên này"
+
+                final = (
+                    f"🎲 *HŨ* • `#{sid}`\n"
+                    f"🎯 *{pred}* ➜ *{actual}* • `{dices[0]}-{dices[1]}-{dices[2]}={total}`\n"
+                    f"{status}"
+                )
+                bot.edit_message_text(final, cid, st["hu_last_pred_msg_id"], parse_mode="Markdown")
+            except Exception:
+                pass
+
+        st["hu_current_prediction"] = None
+        st["hu_has_bet_this_session"] = False
+
+    try:
+        sio.connect(HU_SOCKET_URL, socketio_path=HU_SOCKET_PATH, namespaces=[HU_SOCKET_NAMESPACE],
+                    transports=["websocket"], auth={"token": token},
+                    headers={"User-Agent": "Mozilla/5.0", "Origin": HU_ORIGIN})
+        sio.wait()
+    except Exception as exc:
+        st["hu_connected"] = False
+        logger.warning("Hũ socket dừng cho %s: %s", cid, exc)
+    finally:
+        if hu_sockets.get(cid) is sio:
+            hu_sockets.pop(cid, None)
+
+# ==========================================
+# 🎮 MENU
 # ==========================================
 def main_menu(cid):
     kb = telebot.types.InlineKeyboardMarkup(row_width=2)
@@ -619,63 +1074,56 @@ def main_menu(cid):
         telebot.types.InlineKeyboardButton("🔐 Đăng nhập", callback_data="menu_login"),
         telebot.types.InlineKeyboardButton("🔑 Nhập key", callback_data="menu_key"),
         telebot.types.InlineKeyboardButton("💎 Tài khoản", callback_data="menu_info"),
-        telebot.types.InlineKeyboardButton("⚡ Auto cược", callback_data="menu_auto"),
-        telebot.types.InlineKeyboardButton("💸 Chế độ X2", callback_data="menu_x2"),
+        telebot.types.InlineKeyboardButton("⚡ Auto MD5", callback_data="menu_md5"),
+        telebot.types.InlineKeyboardButton("🎲 Auto Hũ", callback_data="menu_hu"),
         telebot.types.InlineKeyboardButton("📖 Hướng dẫn", callback_data="menu_help"),
-        telebot.types.InlineKeyboardButton("⏹ Ngắt kết nối", callback_data="menu_stop"),
+        telebot.types.InlineKeyboardButton("⏹ Ngắt", callback_data="menu_stop"),
         telebot.types.InlineKeyboardButton("🔄 Làm mới", callback_data="menu_home"),
     ]
     for i in range(0, len(buttons), 2):
         kb.row(*buttons[i:i+2])
     if cid == ADMIN_ID:
-        kb.row(telebot.types.InlineKeyboardButton("👑 Lệnh quản trị", callback_data="menu_admin"))
+        kb.row(telebot.types.InlineKeyboardButton("👑 Admin", callback_data="menu_admin"))
     return kb
 
-
 def menu_text(cid):
-    """Menu văn bản Telegram HTML; không dùng inline keyboard."""
     active = check_auth(cid)
     expiry = ("Vĩnh viễn" if cid == ADMIN_ID else format_expire_time(authorized_users[cid])) if active else "Chưa kích hoạt"
     status = "🟢 <b>ĐÃ KÍCH HOẠT</b>" if active else "🟠 <b>CHƯA KÍCH HOẠT</b>"
     lines = [
         "👑 <b>LCVIP BY ONGCHUSUNWIN</b> 👑",
         "━━━━━━━━━━━━━━━━━━━━",
-        "🛡️ <b>TRUNG TÂM ĐIỀU KHIỂN</b>",
-        f"📡 Trạng thái: {status}",
-        f"⏳ Thời hạn: <b>{html.escape(str(expiry))}</b>",
+        f"📡 {status} | ⏳ <b>{html.escape(str(expiry))}</b>",
         "━━━━━━━━━━━━━━━━━━━━",
         "🏠 <b>LỆNH CƠ BẢN</b>",
-        "🏡 /start — <b>Trang chủ &amp; danh sách lệnh</b>",
-        "📚 /huongdan — <b>Hướng dẫn sử dụng</b>",
-        "🗝️ /nhapkey <code>MA_KEY</code> — <b>Kích hoạt VIP</b>",
-        "🔐 /login <code>TK MK</code> — <b>Đăng nhập game</b>",
-        "💎 /thongtin — <b>Số dư &amp; hạn VIP</b>",
+        "🏡 /start | 📚 /huongdan",
+        "🗝️ /nhapkey <code>KEY</code>",
+        "🔐 /login <code>TK MK</code>",
+        "💎 /thongtin",
         "━━━━━━━━━━━━━━━━━━━━",
-        "⚡ <b>ĐIỀU KHIỂN AUTO CƯỢC</b>",
-        "🟢 /autobet <code>on 1000</code> — <b>Bật cược 1.000đ</b>",
-        "🔴 /autobet <code>off</code> — <b>Dừng auto cược</b>",
-        "🔁 /x2 <code>on</code> — <b>Bật chế độ X2</b>",
-        "🛑 /x2 <code>off</code> — <b>Tắt chế độ X2</b>",
-        "🔌 /stop — <b>Ngắt kết nối game</b>",
-        "<i>⚠️ X2 tăng rủi ro mất vốn; chỉ cược trong giới hạn cho phép.</i>",
+        "⚡ <b>AUTO MD5</b>",
+        "🟢 /autobetmd5 <code>on 1000</code>",
+        "🔴 /autobetmd5 <code>off</code>",
+        "🔁 /autobetmd5 <code>x2</code>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "🎲 <b>AUTO HŨ</b>",
+        "🟢 /autobethu <code>on 1000</code>",
+        "🔴 /autobethu <code>off</code>",
+        "🔁 /autobethu <code>x2</code>",
+        "📜 /hulichsu",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "🔌 /stop",
+        f"<i>⚠️ MD5 &amp; Hũ đều tích lũy {WARMUP_SESSIONS} phiên trước khi dự đoán.</i>",
     ]
     if cid == ADMIN_ID:
         lines.extend([
-            "━━━━━━━━━━━━━━━━━━━━", "👑 <b>QUẢN TRỊ VIÊN</b>",
-            "👥 /dsuser — <b>Danh sách người dùng</b>",
-            "🔴 /tatbot — <b>Tắt hệ thống</b>",
-            "🟢 /mobot — <b>Mở hệ thống</b>",
-            "📊 /lichsucau — <b>Lịch sử 30 phiên</b>",
-            "📂 /xuatfile — <b>Xuất lịch sử TXT</b>",
-            "🔑 /taokey — <b>Tạo key VIP</b>",
-            "🗂️ /danhsachkey — <b>Danh sách key</b>",
-            "📢 /thongbao — <b>Thông báo toàn bộ</b>",
-            "📋 /lichsulogin — <b>Lịch sử đăng nhập</b>",
+            "━━━━━━━━━━━━━━━━━━━━", "👑 <b>ADMIN</b>",
+            "👥 /dsuser | 🔴 /tatbot | 🟢 /mobot",
+            "📂 /xuatfile | 🔑 /taokey | 🗂️ /danhsachkey",
+            "📢 /thongbao | 📋 /lichsulogin",
         ])
-    lines.extend(["━━━━━━━━━━━━━━━━━━━━", "💬 <i>Gõ lệnh tương ứng để sử dụng.</i>",
-                  f"🆘 Hỗ trợ: <b>{html.escape(str(ADMIN_USERNAME))}</b>"])
+    lines.extend(["━━━━━━━━━━━━━━━━━━━━", f"🆘 <b>{html.escape(str(ADMIN_USERNAME))}</b>"])
     return "\n".join(lines)
-
 
 @bot.message_handler(commands=['start', 'menu'])
 def cmd_start(m):
@@ -684,14 +1132,13 @@ def cmd_start(m):
     all_known_users[cid] = f"@{uname}" if m.from_user.username else uname
     init_user_state(cid)
     if not SYSTEM_ACTIVE and cid != ADMIN_ID:
-        return bot.send_message(cid, "🔴 Hệ thống đang tạm dừng!")
+        return bot.send_message(cid, "🔴 Hệ thống tạm dừng!")
     try:
         bot.set_my_commands(ADMIN_COMMANDS if cid == ADMIN_ID else USER_COMMANDS,
                             scope=telebot.types.BotCommandScopeChat(cid))
     except Exception as exc:
-        logger.warning("Không cập nhật được danh sách lệnh Telegram: %s", exc)
+        logger.warning("Set commands lỗi: %s", exc)
     bot.send_message(cid, menu_text(cid), parse_mode="HTML", disable_web_page_preview=True)
-
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('menu_'))
 def menu_callback(call):
@@ -699,7 +1146,7 @@ def menu_callback(call):
     action = call.data[5:]
     bot.answer_callback_query(call.id)
     if not SYSTEM_ACTIVE and cid != ADMIN_ID:
-        return bot.send_message(cid, "🔴 Hệ thống đang tạm dừng!")
+        return bot.send_message(cid, "🔴 Hệ thống tạm dừng!")
     if action == 'home':
         try:
             bot.edit_message_text(menu_text(cid), cid, call.message.message_id, parse_mode="HTML")
@@ -707,14 +1154,14 @@ def menu_callback(call):
             bot.send_message(cid, menu_text(cid), parse_mode="HTML")
         return
     prompts = {
-        'login': "🔐 Đăng nhập bằng lệnh:\n/login TAIKHOAN MATKHAU\n⚠️ Không chia sẻ mật khẩu trong nhóm.",
-        'key': "🔑 Kích hoạt VIP:\n/nhapkey MA_KEY",
-        'auto': "⚡ Điều khiển tự động cược:\n/autobet on 10000\n/autobet off\n⚠️ Cần đăng nhập game trước.",
-        'x2': "💸 Chế độ X2:\n/x2 on\n/x2 off\n⚠️ Tăng cược khi thua có rủi ro mất tiền nhanh.",
-        'admin': "👑 Quản trị:\n/taokey /danhsachkey /dsuser\n/tatbot /mobot /thongbao\n/lichsucau /xuatfile /lichsulogin",
+        'login': "🔐 `/login TAIKHOAN MATKHAU`",
+        'key': "🔑 `/nhapkey MA_KEY`",
+        'md5': f"⚡ *AUTO MD5:*\n`/autobetmd5 on 10000`\n`/autobetmd5 off`\n`/autobetmd5 x2`\n⏳ Tích lũy {WARMUP_SESSIONS} phiên.",
+        'hu': f"🎲 *AUTO HŨ:*\n`/autobethu on 10000`\n`/autobethu off`\n`/autobethu x2`\n`/hulichsu`\n⏳ Tích lũy {WARMUP_SESSIONS} phiên.",
+        'admin': "👑 /taokey /danhsachkey /dsuser\n/tatbot /mobot /thongbao /xuatfile /lichsulogin",
     }
     if action == 'admin' and cid != ADMIN_ID:
-        return bot.send_message(cid, "⛔ Chỉ dành cho admin.")
+        return bot.send_message(cid, "⛔ Chỉ admin.")
     if action in prompts:
         return bot.send_message(cid, prompts[action], reply_markup=main_menu(cid))
     if action in ('info', 'stop', 'help'):
@@ -728,189 +1175,154 @@ def cmd_huongdan(m):
     cid = m.chat.id
     uname = m.from_user.username or m.from_user.first_name or "Unknown"
     all_known_users[cid] = f"@{uname}" if m.from_user.username else uname
-    
     if not SYSTEM_ACTIVE and cid != ADMIN_ID:
-        return safe_send_and_clean(cid, "🔴 **Hệ thống LCVIP đang tạm tắt bởi Admin!**", delay=5)
-
+        return safe_send_and_clean(cid, "🔴 Hệ thống tạm tắt!", delay=5)
     msg = (
-        f"📖 **HƯỚNG DẪN LCVIP BY ONGCHUSUNWIN**\n"
-        f"----------------------------------\n"
-        f"🔑 `/nhapkey MÃ` - Nhập key kích hoạt\n"
-        f"🔐 `/login TK MK` - Đăng nhập tài khoản game\n"
-        f"⚡ `/autobet on 10000` | `/autobet off` - Bật/Tắt Auto\n"
-        f"💸 `/x2 on` | `/x2 off` - Quản lý X2 khi thua\n"
-        f"💎 `/thongtin` - Xem thông tin số dư & hạn VIP\n"
-        f"⏹️ `/stop` - Ngắt kết nối\n"
+        f"📖 **HƯỚNG DẪN LCVIP**\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔑 `/nhapkey MÃ`\n"
+        f"🔐 `/login TK MK`\n"
+        f"💎 `/thongtin`\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚡ **AUTO MD5**\n"
+        f"`/autobetmd5 on 10000`\n"
+        f"`/autobetmd5 off`\n"
+        f"`/autobetmd5 x2`\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎲 **AUTO HŨ**\n"
+        f"`/autobethu on 10000`\n"
+        f"`/autobethu off`\n"
+        f"`/autobethu x2`\n"
+        f"`/hulichsu`\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔌 `/stop`\n"
+        f"🧪 Cả MD5 và Hũ đều tích lũy {WARMUP_SESSIONS} phiên trước khi dự đoán.\n"
         f"📩 Hỗ trợ: {ADMIN_USERNAME}"
     )
-    safe_send_and_clean(cid, msg, delay=12)
+    safe_send_and_clean(cid, msg, delay=15)
 
+# ==========================================
+# ADMIN
+# ==========================================
 @bot.message_handler(commands=['dsuser'])
 def admin_list_users(m):
     if m.chat.id != ADMIN_ID:
-        return safe_send_and_clean(m.chat.id, "⛔ Lệnh này chỉ dành cho Admin!", delay=4)
-    
+        return safe_send_and_clean(m.chat.id, "⛔ Chỉ admin!", delay=4)
     if not all_known_users:
-        return bot.reply_to(m, "📭 Chưa có user nào tương tác với bot.")
-    
-    user_list_str = "\n".join([f"• UID: `{uid}` | Tên: `{uname}`" for uid, uname in all_known_users.items()])
-    bot.reply_to(m, f"👥 **DANH SÁCH USER ĐÃ SỬ DỤNG BOT** ({len(all_known_users)}):\n----------------------------------\n{user_list_str}", parse_mode="Markdown")
+        return bot.reply_to(m, "📭 Chưa có user.")
+    s = "\n".join([f"• `{uid}` | `{u}`" for uid, u in all_known_users.items()])
+    bot.reply_to(m, f"👥 **USERS** ({len(all_known_users)}):\n{s}", parse_mode="Markdown")
 
 @bot.message_handler(commands=['tatbot'])
 def admin_turn_off_bot(m):
     global SYSTEM_ACTIVE
-    if m.chat.id != ADMIN_ID:
-        return
+    if m.chat.id != ADMIN_ID: return
     SYSTEM_ACTIVE = False
-    bot.reply_to(m, "🔴 **Đã tắt toàn bộ hệ thống Bot thành công!**", parse_mode="Markdown")
-    
+    bot.reply_to(m, "🔴 **Đã tắt Bot!**", parse_mode="Markdown")
     for uid in all_known_users.keys():
         try:
             bot.send_message(uid, "📢 **BỐ ĐÃ TẮT BOT NÀO MỞ TUỲ DUYÊN OK**", parse_mode="Markdown")
             time.sleep(0.05)
-        except:
-            pass
+        except: pass
 
 @bot.message_handler(commands=['mobot'])
 def admin_turn_on_bot(m):
     global SYSTEM_ACTIVE
-    if m.chat.id != ADMIN_ID:
-        return
+    if m.chat.id != ADMIN_ID: return
     SYSTEM_ACTIVE = True
-    bot.reply_to(m, "🟢 **Đã mở lại hệ thống Bot hoạt động bình thường!**", parse_mode="Markdown")
-
-@bot.message_handler(commands=['lichsucau'])
-def admin_view_history(m):
-    if m.chat.id != ADMIN_ID:
-        return safe_send_and_clean(m.chat.id, "⛔ Lệnh này chỉ dành cho Admin!", delay=4)
-    
-    st = user_states.get(m.chat.id)
-    if not st or not st["history"]:
-        return bot.reply_to(m, "📭 Chưa có dữ liệu lịch sử cầu nào được nạp.")
-    
-    recent_res = st["history"][-30:]
-    s = "".join("🔵" if x == "TAI" else "🔴" for x in recent_res)
-    tai_count = recent_res.count('TAI')
-    xiu_count = recent_res.count('XIU')
-    
-    msg = (
-        f"📊 **[ADMIN] 30 PHIÊN CẦU GẦN NHẤT**\n"
-        f"----------------------------------\n"
-        f"🔵 Tổng Tài: `{tai_count}` | 🔴 Tổng Xỉu: `{xiu_count}`\n\n"
-        f"{s}"
-    )
-    bot.reply_to(m, msg, parse_mode="Markdown")
+    bot.reply_to(m, "🟢 **Đã mở Bot!**", parse_mode="Markdown")
 
 @bot.message_handler(commands=['xuatfile'])
 def admin_export_txt(m):
     if m.chat.id != ADMIN_ID:
-        return safe_send_and_clean(m.chat.id, "⛔ Lệnh này chỉ dành cho Admin!", delay=4)
-    
+        return safe_send_and_clean(m.chat.id, "⛔ Chỉ admin!", delay=4)
     if not global_session_logs:
-        return bot.reply_to(m, "📭 Chưa có dữ liệu phiên giao dịch nào để xuất file.")
-    
-    filename = f"lich_su_giao_dich_{datetime.now(ICT).strftime('%Y%m%d_%H%M%S')}.txt"
-    filepath = f"/tmp/{filename}" if os.path.exists("/tmp") else filename
-    
+        return bot.reply_to(m, "📭 Chưa có dữ liệu.")
+    fn = f"lcvip_{datetime.now(ICT).strftime('%Y%m%d_%H%M%S')}.txt"
+    fp = f"/tmp/{fn}" if os.path.exists("/tmp") else fn
     try:
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write("==================================================\n")
-            f.write("    BÁO CÁO LỊCH SỬ GIAO DỊCH LCVIP BY ONGCHUSUNWIN\n")
-            f.write("==================================================\n\n")
+        with open(fp, "w", encoding="utf-8") as f:
+            f.write("BÁO CÁO LCVIP\n" + "="*50 + "\n\n")
             for log in global_session_logs:
-                f.write(f"Thời gian: {log['time']}\n")
-                f.write(f"Phiên: #{log['session']} | Xúc xắc: {log['dice']} (Tổng: {log['total']})\n")
-                f.write(f"Kết quả thực tế: {log['result']} | Bot dự đoán: {log['prediction']}\n")
-                f.write(f"Trạng thái: {log['status']} | Lãi/Lỗ: {log['profit']:,} VNĐ\n")
-                f.write(f"Số dư tài khoản: {log['balance']:,} VNĐ\n")
-                f.write("--------------------------------------------------\n")
-        
-        with open(filepath, "rb") as doc:
-            bot.send_document(m.chat.id, doc, caption="📁 **File báo cáo lịch sử giao dịch LCVIP**", parse_mode="Markdown")
-        
-        if os.path.exists("/tmp") and os.path.exists(filepath):
-            os.remove(filepath)
+                f.write(f"{log['time']} | {log.get('game','MD5')}\n")
+                f.write(f"Phiên #{log['session']} | {log['dice']} = {log['total']}\n")
+                f.write(f"Thực tế: {log['result']} | Bot: {log['prediction']}\n")
+                f.write(f"{log['status']} | Lãi/Lỗ: {log['profit']:,} | Số dư: {log['balance']:,}\n")
+                f.write("-"*50 + "\n")
+        with open(fp, "rb") as doc:
+            bot.send_document(m.chat.id, doc, caption="📁 Báo cáo LCVIP", parse_mode="Markdown")
+        if os.path.exists("/tmp") and os.path.exists(fp):
+            os.remove(fp)
     except Exception as e:
-        bot.reply_to(m, f"❌ Lỗi khi xuất file: {e}")
+        bot.reply_to(m, f"❌ Lỗi: {e}")
 
 @bot.message_handler(commands=['taokey'])
 def gk(m):
-    if m.chat.id != ADMIN_ID:
-        return
+    if m.chat.id != ADMIN_ID: return
     try:
         p = m.text.split()
         hours = int(p[1]) if len(p) > 1 else 720
         k = "ongchusunwin-" + ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
         valid_keys[k] = hours * 3600
         save_keys()
-        
-        exp_dt = datetime.now(ICT) + timedelta(hours=hours)
-        ht = exp_dt.strftime("%d/%m/%Y %H:%M")
-        bot.reply_to(m, f"👑 Key mới ({hours} giờ):\n<code>{k}</code>\n📅 Hạn kích hoạt sau khi sử dụng: {hours} giờ", parse_mode="HTML")
+        bot.reply_to(m, f"👑 Key ({hours}h):\n<code>{k}</code>", parse_mode="HTML")
     except:
-        bot.reply_to(m, "Cú pháp: `/taokey 24` (tạo key 24 giờ)", parse_mode="Markdown")
+        bot.reply_to(m, "`/taokey 24`", parse_mode="Markdown")
 
 @bot.message_handler(commands=['danhsachkey'])
 def lk(m):
-    if m.chat.id != ADMIN_ID:
-        return
+    if m.chat.id != ADMIN_ID: return
     if not valid_keys:
-        return bot.reply_to(m, "📭 Danh sách key trống.")
-    ds = "\n".join([f"🔑 `<code>{k}</code>`: {v//3600} giờ" for k, v in valid_keys.items()])
-    bot.reply_to(m, f"📋 **DS KEY CÒN LẠI** ({len(valid_keys)}):\n{ds}", parse_mode="HTML")
+        return bot.reply_to(m, "📭 Trống.")
+    ds = "\n".join([f"🔑 `<code>{k}</code>`: {v//3600}h" for k, v in valid_keys.items()])
+    bot.reply_to(m, f"📋 **KEY** ({len(valid_keys)}):\n{ds}", parse_mode="HTML")
 
 @bot.message_handler(commands=['thongbao'])
 def broadcast_msg(m):
-    if m.chat.id != ADMIN_ID:
-        return
+    if m.chat.id != ADMIN_ID: return
     content = m.text.replace("/thongbao", "").strip()
     if not content:
-        return bot.reply_to(m, "⚠️ Cú pháp: `/thongbao [Nội dung thông báo]`", parse_mode="Markdown")
-    
-    success = 0
-    fail = 0
+        return bot.reply_to(m, "⚠️ `/thongbao [Nội dung]`", parse_mode="Markdown")
+    s, f_ = 0, 0
     for uid in all_known_users.keys():
         try:
-            bot.send_message(uid, f"📢 **THÔNG BÁO TỪ ADMIN (LCVIP)**\n\n{content}", parse_mode="Markdown")
-            success += 1
+            bot.send_message(uid, f"📢 **THÔNG BÁO TỪ ADMIN**\n\n{content}", parse_mode="Markdown")
+            s += 1
             time.sleep(0.1)
-        except:
-            fail += 1
-    bot.reply_to(m, f"✅ Đã gửi thông báo thành công tới `{success}` user (Lỗi: `{fail}`)", parse_mode="Markdown")
+        except: f_ += 1
+    bot.reply_to(m, f"✅ `{s}` (Lỗi: `{f_}`)", parse_mode="Markdown")
 
 @bot.message_handler(commands=['lichsulogin'])
 def view_login_history(m):
-    if m.chat.id != ADMIN_ID:
-        return
+    if m.chat.id != ADMIN_ID: return
     if not login_history:
-        return bot.reply_to(m, "📭 Chưa có lượt đăng nhập nào.")
-    txt = "\n".join([f"🕒 `{i['time']}` | ID:`{i['chat_id']}`\n👤 `{i['username']}` | `{i['nickname']}`" for i in login_history[-15:]])
-    bot.reply_to(m, f"📋 **LỊCH SỬ LOGIN**:\n{txt}", parse_mode="Markdown")
+        return bot.reply_to(m, "📭 Chưa có login.")
+    txt = "\n".join([f"🕒 `{i['time']}` | `{i['chat_id']}`\n👤 `{i['username']}` | `{i['nickname']}`" for i in login_history[-15:]])
+    bot.reply_to(m, f"📋 **LOGIN**:\n{txt}", parse_mode="Markdown")
 
+# ==========================================
+# USER
+# ==========================================
 @bot.message_handler(commands=['nhapkey'])
 def ak(m):
     cid = m.chat.id
     uname = m.from_user.username or m.from_user.first_name or "Unknown"
     all_known_users[cid] = f"@{uname}" if m.from_user.username else uname
-    
     if not SYSTEM_ACTIVE and cid != ADMIN_ID:
-        return safe_send_and_clean(cid, "🔴 **Hệ thống LCVIP đang tạm tắt bởi Admin!**", delay=5)
-
+        return safe_send_and_clean(cid, "🔴 Hệ thống tạm tắt!", delay=5)
     p = m.text.split()
     if len(p) < 2:
-        return bot.send_message(cid, f"⚠️ Cú pháp: /nhapkey MÃ_KEY\n📩 Hỗ trợ: {ADMIN_USERNAME}")
+        return bot.send_message(cid, f"⚠️ `/nhapkey MÃ`\n📩 {ADMIN_USERNAME}", parse_mode="Markdown")
     k = p[1].strip()
     if k in valid_keys:
         duration_seconds = valid_keys[k]
         authorized_users[cid] = time.time() + duration_seconds
         del valid_keys[k]
         save_keys()
-        
         exp_dt = datetime.now(ICT) + timedelta(seconds=duration_seconds)
-        ht = exp_dt.strftime("%d/%m/%Y lúc %H:%M")
-        bot.send_message(cid, f"✅ Kích hoạt LCVIP thành công!\n📅 Hạn dùng đến: {ht} (ICT)")
+        bot.send_message(cid, f"✅ Kích hoạt VIP!\n📅 Hạn: {exp_dt.strftime('%d/%m/%Y %H:%M')} (ICT)")
     else:
-        bot.send_message(cid, f"❌ Key không hợp lệ, đã dùng hoặc không tồn tại trong dữ liệu bot hiện tại.\n📩 Hỗ trợ: {ADMIN_USERNAME}")
+        bot.send_message(cid, f"❌ Key không hợp lệ.\n📩 {ADMIN_USERNAME}")
 
 @bot.message_handler(commands=['thongtin'])
 @require_auth
@@ -918,26 +1330,31 @@ def tt(m):
     cid = m.chat.id
     uname = m.from_user.username or m.from_user.first_name or "Unknown"
     all_known_users[cid] = f"@{uname}" if m.from_user.username else uname
-    init_user_state(cid)
-    st = user_states[cid]
-    
-    if cid == ADMIN_ID:
-        han = "Vĩnh Viễn"
-    else:
-        exp_ts = authorized_users[cid]
-        exp_dt = datetime.fromtimestamp(exp_ts, ICT)
-        han = exp_dt.strftime("%d/%m/%Y %H:%M") + " (ICT)"
-        
-    x2 = f"Cấp {st['martingale_level']}" if st["martingale_enabled"] else "Tắt"
-    
+    st = init_user_state(cid)
+    han = "Vĩnh Viễn" if cid == ADMIN_ID else datetime.fromtimestamp(authorized_users[cid], ICT).strftime('%d/%m/%Y %H:%M') + " (ICT)"
+
+    x2_md5 = f"Cấp {st['md5_martingale_level']}" if st["md5_martingale_enabled"] else "Tắt"
+    x2_hu = f"Cấp {st['hu_martingale_level']}" if st["hu_martingale_enabled"] else "Tắt"
+    warm_md5 = "Xong" if st.get("md5_warmup_remaining", 0) == 0 else f"{WARMUP_SESSIONS - st['md5_warmup_remaining']}/{WARMUP_SESSIONS}"
+    warm_hu = "Xong" if st.get("hu_warmup_remaining", 0) == 0 else f"{WARMUP_SESSIONS - st['hu_warmup_remaining']}/{WARMUP_SESSIONS}"
+
     msg = (
-        f"👑 **LCVIP BY ONGCHUSUNWIN** 👑\n"
-        f"----------------------------------\n"
+        f"👑 **LCVIP BY ONGCHUSUNWIN**\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
         f"• Hạn VIP: `{han}`\n"
-        f"• Auto Bet: `{'Bật' if st['auto_bet_enabled'] else 'Tắt'}`\n"
-        f"• Chế độ X2: `{x2}` | Cược gốc: `{st['base_bet']:,}`\n"
         f"• Số dư: `{st['balance']:,} VNĐ`\n"
-        f"• Thắng/Thua: `{st['total_win']}` / `{st['total_lose']}`"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚡ **MD5**\n"
+        f"• Auto: `{'BẬT' if st['md5_auto_bet'] else 'TẮT'}` | X2: `{x2_md5}`\n"
+        f"• Cược/phiên: `{st.get('md5_bet_amount',0):,}đ`\n"
+        f"• W/L: `{st['md5_total_win']}/{st['md5_total_lose']}` | Ròng: `{st['md5_net_profit']:+,}`\n"
+        f"• Chuỗi: `{st['md5_win_streak']}T/{st['md5_lose_streak']}B` | Warmup: `{warm_md5}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎲 **HŨ**\n"
+        f"• Auto: `{'BẬT' if st['hu_enabled'] else 'TẮT'}` | X2: `{x2_hu}`\n"
+        f"• Cược/phiên: `{st.get('hu_bet_amount',0):,}đ`\n"
+        f"• W/L: `{st['hu_total_win']}/{st['hu_total_lose']}` | Ròng: `{st['hu_net_profit']:+,}`\n"
+        f"• Chuỗi: `{st['hu_win_streak']}T/{st['hu_lose_streak']}B` | Warmup: `{warm_hu}`"
     )
     safe_send_and_clean(cid, msg, delay=10)
 
@@ -949,118 +1366,240 @@ def lg(m):
     all_known_users[cid] = f"@{uname}" if m.from_user.username else uname
     p = m.text.split()
     if len(p) != 3:
-        return safe_send_and_clean(cid, "⚠️ Cú pháp: `/login TAIKHOAN MATKHAU`", delay=5)
-    
-    mm = bot.send_message(cid, "🔄 Đang kết nối server game...")
+        return safe_send_and_clean(cid, "⚠️ `/login TAIKHOAN MATKHAU`", delay=5)
+
+    mm = bot.send_message(cid, "🔄 Đang kết nối...")
     res = login_and_get_token(p[1], p[2])
     if "_error" in res:
         try: bot.delete_message(cid, mm.message_id)
         except: pass
-        return safe_send_and_clean(cid, f"❌ Lỗi: {res['_error']}", delay=5)
-    
+        return safe_send_and_clean(cid, f"❌ {res['_error']}", delay=5)
+
     login_history.append({
         "time": datetime.now(ICT).strftime("%d/%m %H:%M"),
-        "chat_id": cid,
-        "username": p[1],
-        "nickname": res['nickname']
+        "chat_id": cid, "username": p[1], "nickname": res['nickname']
     })
 
-    init_user_state(cid)
-    st = user_states[cid]
-    st["balance"] = res["money"]
-    st["base_bet"] = st["bet_amount"]
-    # Đăng nhập chỉ kết nối và dự đoán, tuyệt đối không tự kích hoạt cược.
-    st["auto_bet_enabled"] = False
-    st["prediction_enabled"] = False
-    st["martingale_enabled"] = False
-    st["martingale_level"] = 0
-    st["has_bet_this_session"] = False
-    
+    for d in (active_sockets, hu_sockets):
+        if cid in d:
+            try: d[cid].disconnect()
+            except Exception: pass
+            d.pop(cid, None)
+
+    st = init_user_state(cid)
+    # Reset toàn bộ
+    st.update({
+        "balance": res["money"], "game_token": res["token"],
+        "md5_raw_hist": [], "md5_history": [], "md5_enabled": False, "md5_auto_bet": False,
+        "md5_martingale_enabled": False, "md5_martingale_level": 0,
+        "md5_bet_amount": 10000, "md5_base_bet": 10000,
+        "md5_warmup_remaining": 0, "md5_net_profit": 0, "md5_peak_profit": 0,
+        "md5_total_win": 0, "md5_total_lose": 0, "md5_win_streak": 0, "md5_lose_streak": 0,
+        "md5_ready_notified": False, "md5_round_open": False, "md5_synced": False,
+        "hu_enabled": False, "hu_connected": False, "hu_martingale_enabled": False,
+        "hu_martingale_level": 0, "hu_bet_amount": 10000, "hu_base_bet": 10000,
+        "hu_warmup_remaining": 0, "hu_net_profit": 0, "hu_peak_profit": 0,
+        "hu_total_win": 0, "hu_total_lose": 0, "hu_win_streak": 0, "hu_lose_streak": 0,
+        "hu_ready_notified": False, "hu_round_open": False, "hu_synced": False,
+    })
+
     try: bot.delete_message(cid, mm.message_id)
     except: pass
 
-    msg = (f"✅ *Đăng nhập LCVIP thành công!*\n📛 `{res['nickname']}` | Số dư: `{res['money']:,} VNĐ`\n"
-           "🔒 *AUTO CƯỢC: ĐANG TẮT*\n"
-           "💤 Bot đang nghỉ: KHÔNG dự đoán, KHÔNG đặt cược.\n"
-           "▶️ Muốn cược: `/autobet on 1000`\n"
-           "⏹ Dừng cược: `/autobet off`\n"
-           "🔁 Gấp X2: `/x2 on` hoặc `/x2 off`")
-    safe_send_and_clean(cid, msg, delay=8)
-    threading.Thread(target=start_websocket, args=(cid, res["token"], p[1]), daemon=True).start()
+    msg = (
+        f"✅ *Đăng nhập LCVIP thành công!*\n"
+        f"📛 `{res['nickname']}` | Số dư: `{res['money']:,} VNĐ`\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚡ MD5: `/autobetmd5 on 1000`\n"
+        f"🎲 Hũ: `/autobethu on 1000`"
+    )
+    safe_send_and_clean(cid, msg, delay=10)
+    threading.Thread(target=start_md5_websocket, args=(cid, res["token"]), daemon=True).start()
 
-@bot.message_handler(commands=['autobet'])
+# ==========================================
+# ⚡ AUTO MD5 (SONG SONG VỚI HŨ)
+# ==========================================
+@bot.message_handler(commands=['autobetmd5'])
 @require_auth
-def ab(m):
+def cmd_autobetmd5(m):
     cid = m.chat.id
-    if cid not in active_sockets:
-        return safe_send_and_clean(cid, "⚠️ Hãy thực hiện `/login` trước!", delay=4)
+    st = init_user_state(cid)
     p = m.text.split()
+
     if len(p) < 2:
-        return safe_send_and_clean(cid, "⚠️ Cú pháp: `/autobet on 10000` hoặc `/autobet off`", delay=4)
-    st = user_states[cid]
+        x2 = "BẬT" if st["md5_martingale_enabled"] else "TẮT"
+        return safe_send_and_clean(
+            cid,
+            f"⚡ *AUTO MD5:* `{'BẬT' if st['md5_auto_bet'] else 'TẮT'}` | X2: `{x2}`\n"
+            f"• `/autobetmd5 on 1000`\n• `/autobetmd5 off`\n• `/autobetmd5 x2`",
+            delay=10
+        )
+
     action = p[1].lower()
+
     if action == "on":
+        if cid not in active_sockets:
+            return safe_send_and_clean(cid, "⚠️ Hãy `/login` trước.", delay=4)
         if len(p) != 3:
-            return safe_send_and_clean(cid, "⚠️ Cú pháp: `/autobet on 1000`", delay=8)
+            return safe_send_and_clean(cid, "⚠️ `/autobetmd5 on 1000`", delay=8)
         try:
             amt = int(p[2])
         except ValueError:
-            return safe_send_and_clean(cid, "❌ Tiền cược phải là số nguyên dương.", delay=8)
-        if amt <= 0:
-            return safe_send_and_clean(cid, "❌ Tiền cược phải lớn hơn 0.", delay=8)
-        if amt > st.get("balance", 0):
-            return safe_send_and_clean(cid, "⚠️ Số dư không đủ để bật cược mức này.", delay=8)
-        st["bet_amount"] = amt
-        st["base_bet"] = amt
-        st["martingale_level"] = 0
-        st["auto_bet_enabled"] = True
-        st["prediction_enabled"] = True
-        safe_send_and_clean(cid, f"🟢 *Đã bật dự đoán và Auto cược*\n💵 Cược gốc: `{amt:,} VNĐ`\n⏳ Bắt đầu từ phiên mới tiếp theo, không cược bù phiên cũ.", delay=0)
-    elif action == "off":
-        st["auto_bet_enabled"] = False
-        st["prediction_enabled"] = False
-        st["current_prediction"] = None
-        safe_send_and_clean(cid, "🔴 *Đã dừng toàn bộ.*\n💤 Không dự đoán phiên mới, không gửi lệnh cược. Kết nối vẫn duy trì.", delay=0)
-    else:
-        safe_send_and_clean(cid, "⚠️ Dùng `/autobet on 1000` hoặc `/autobet off`", delay=8)
+            return safe_send_and_clean(cid, "❌ Tiền cược phải là số.", delay=8)
+        if amt < MIN_BET:
+            return safe_send_and_clean(cid, f"❌ Tối thiểu `{MIN_BET:,}đ`.", delay=8)
+        if amt > int(st.get("balance", 0)):
+            return safe_send_and_clean(cid, "⚠️ Số dư không đủ.", delay=8)
 
-@bot.message_handler(commands=['x2'])
-@require_auth
-def cmd_x2(m):
-    cid = m.chat.id
-    st = user_states[cid]
-    p = m.text.split()
-    if len(p) < 2:
-        tt = f"Cấp {st['martingale_level']}" if st["martingale_enabled"] else "Tắt"
-        return safe_send_and_clean(cid, f"💸 **X2**: {tt} | Dùng `/x2 on` hoặc `/x2 off`", delay=5)
-    if p[1].lower() == "on":
-        st["martingale_enabled"] = True
-        st["martingale_level"] = 0
-        safe_send_and_clean(cid, "💸 **Đã Bật X2 Khi Thua** (Max 6 cấp)", delay=6)
+        st["md5_bet_amount"] = amt
+        st["md5_base_bet"] = amt
+        st["md5_martingale_level"] = 0
+        st["md5_auto_bet"] = True
+        st["md5_enabled"] = True
+        st["md5_ready_notified"] = len(st.get("md5_raw_hist", [])) >= MIN_HISTORY
+        st["md5_warmup_remaining"] = WARMUP_SESSIONS
+
+        need = max(0, MIN_HISTORY - len(st.get("md5_raw_hist", [])))
+        data_line = f"📚 Có `{len(st.get('md5_raw_hist', []))}` phiên, cần thêm `{need}`." if need else f"📚 Đủ `{len(st.get('md5_raw_hist', []))}` phiên."
+        return safe_send_and_clean(
+            cid,
+            f"🔴 *BẬT AUTO MD5*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"💵 Cược/phiên: `{amt:,}đ`\n"
+            f"⏳ Tích lũy: `{WARMUP_SESSIONS}` phiên\n"
+            f"{data_line}\n"
+            f"⚙️ `/autobetmd5 x2` để bật gấp đôi\n"
+            f"⏹ `/autobetmd5 off` để dừng",
+            delay=0
+        )
+
+    elif action == "off":
+        st["md5_enabled"] = False
+        st["md5_auto_bet"] = False
+        st["md5_current_prediction"] = None
+        st["md5_has_bet_this_session"] = False
+        st["md5_round_open"] = False
+        st["md5_warmup_remaining"] = 0
+        return safe_send_and_clean(cid, "🔴 *Đã tắt Auto MD5.*", delay=0)
+
+    elif action == "x2":
+        st["md5_martingale_enabled"] = not st.get("md5_martingale_enabled", False)
+        st["md5_martingale_level"] = 0
+        if st["md5_martingale_enabled"]:
+            safe_send_and_clean(cid, f"🔁 *BẬT X2 MD5* (Max {MAX_MARTINGALE_LEVEL} cấp ×{MARTINGALE_MULTIPLIER})", delay=6)
+        else:
+            safe_send_and_clean(cid, "🔴 *TẮT X2 MD5*", delay=5)
     else:
-        st["martingale_enabled"] = False
-        st["martingale_level"] = 0
-        safe_send_and_clean(cid, "🔴 **Đã Tắt X2**", delay=5)
+        safe_send_and_clean(cid, "⚠️ Dùng `on 1000` | `off` | `x2`", delay=8)
+
+# ==========================================
+# 🎲 AUTO HŨ (SONG SONG)
+# ==========================================
+@bot.message_handler(commands=['autobethu'])
+@require_auth
+def cmd_autobethu(m):
+    cid = m.chat.id
+    st = init_user_state(cid)
+    p = m.text.split()
+
+    if len(p) < 2:
+        x2 = "BẬT" if st["hu_martingale_enabled"] else "TẮT"
+        return safe_send_and_clean(
+            cid,
+            f"🎲 *AUTO HŨ:* `{'BẬT' if st['hu_enabled'] else 'TẮT'}` | X2: `{x2}`\n"
+            f"• `/autobethu on 1000`\n• `/autobethu off`\n• `/autobethu x2`",
+            delay=10
+        )
+
+    action = p[1].lower()
+
+    if action == "on":
+        if not st.get("game_token"):
+            return safe_send_and_clean(cid, "⚠️ Hãy `/login` trước.", delay=6)
+        amount = st.get("hu_bet_amount", 10000)
+        if len(p) >= 3:
+            try:
+                amount = int(p[2])
+            except ValueError:
+                return safe_send_and_clean(cid, "❌ Cú pháp: `/autobethu on 10000`", delay=6)
+        if amount < MIN_BET:
+            return safe_send_and_clean(cid, f"❌ Tối thiểu `{MIN_BET:,}đ`.", delay=6)
+        if amount > int(st.get("balance", 0)):
+            return safe_send_and_clean(cid, "❌ Số dư không đủ.", delay=6)
+
+        st["hu_bet_amount"] = amount
+        st["hu_base_bet"] = amount
+        st["hu_enabled"] = True
+        st["hu_martingale_level"] = 0
+        st["hu_ready_notified"] = len(hu_shared_history) >= MIN_HISTORY
+        st["hu_warmup_remaining"] = WARMUP_SESSIONS
+
+        if cid not in hu_sockets:
+            threading.Thread(target=start_hu_websocket, args=(cid, st["game_token"]), daemon=True).start()
+
+        need = max(0, MIN_HISTORY - len(hu_shared_history))
+        data_line = f"📚 Có `{len(hu_shared_history)}` phiên, cần thêm `{need}`." if need else f"📚 Đủ `{len(hu_shared_history)}` phiên."
+        return safe_send_and_clean(
+            cid,
+            f"🔴 *BẬT AUTO HŨ*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"💵 Cược/phiên: `{amount:,}đ`\n"
+            f"⏳ Tích lũy: `{WARMUP_SESSIONS}` phiên\n"
+            f"{data_line}\n"
+            f"⚙️ `/autobethu x2` để bật gấp đôi\n"
+            f"⏹ `/autobethu off` để dừng",
+            delay=0
+        )
+
+    elif action == "off":
+        st["hu_enabled"] = False
+        st["hu_current_prediction"] = None
+        st["hu_has_bet_this_session"] = False
+        st["hu_round_open"] = False
+        st["hu_warmup_remaining"] = 0
+        if cid in hu_sockets:
+            try: hu_sockets[cid].disconnect()
+            except Exception: pass
+            hu_sockets.pop(cid, None)
+        st["hu_connected"] = False
+        return safe_send_and_clean(cid, "🔴 *Đã tắt Auto Hũ.*", delay=0)
+
+    elif action == "x2":
+        st["hu_martingale_enabled"] = not st.get("hu_martingale_enabled", False)
+        st["hu_martingale_level"] = 0
+        if st["hu_martingale_enabled"]:
+            safe_send_and_clean(cid, f"🔁 *BẬT X2 HŨ* (Max {MAX_MARTINGALE_LEVEL} cấp ×{MARTINGALE_MULTIPLIER})", delay=6)
+        else:
+            safe_send_and_clean(cid, "🔴 *TẮT X2 HŨ*", delay=5)
+    else:
+        safe_send_and_clean(cid, "⚠️ Dùng `on 1000` | `off` | `x2`", delay=8)
+
+@bot.message_handler(commands=['hulichsu'])
+@require_auth
+def cmd_hu_history(m):
+    safe_send_and_clean(m.chat.id, _hu_history_text(20), delay=15)
 
 @bot.message_handler(commands=['stop'])
 @require_auth
 def sp(m):
     cid = m.chat.id
-    if cid in active_sockets:
-        try:
-            active_sockets[cid].disconnect()
-        except Exception:
-            pass
-        del active_sockets[cid]
-    st = user_states[cid]
-    st["auto_bet_enabled"] = False
-    st["prediction_enabled"] = False
-    st["martingale_enabled"] = False
-    st["martingale_level"] = 0
-    safe_send_and_clean(cid, "⏹️ **Đã ngắt kết nối an toàn!**", delay=5)
+    for d in (active_sockets, hu_sockets):
+        if cid in d:
+            try: d[cid].disconnect()
+            except Exception: pass
+            d.pop(cid, None)
+    st = init_user_state(cid)
+    st.update({
+        "md5_enabled": False, "md5_auto_bet": False, "md5_martingale_enabled": False,
+        "md5_martingale_level": 0, "md5_warmup_remaining": 0, "md5_round_open": False,
+        "md5_has_bet_this_session": False, "md5_current_prediction": None,
+        "hu_enabled": False, "hu_connected": False, "hu_martingale_enabled": False,
+        "hu_martingale_level": 0, "hu_warmup_remaining": 0, "hu_round_open": False,
+        "hu_has_bet_this_session": False, "hu_current_prediction": None,
+    })
+    safe_send_and_clean(cid, "⏹️ *Đã ngắt toàn bộ MD5 + Hũ!*", delay=5)
 
 if __name__ == "__main__":
     threading.Thread(target=run_web, daemon=True).start()
-    print("👑 LCVIP BY ONGCHUSUNWIN - ADMIN COMMANDS HIDDEN SECURELY")
+    print("👑 LCVIP BY ONGCHUSUNWIN - MD5 & HŨ SONG SONG")
     bot.infinity_polling()
-
