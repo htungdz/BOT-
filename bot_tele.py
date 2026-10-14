@@ -43,6 +43,21 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 8681721470))
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "@bulontaodihaha")
 bot = telebot.TeleBot(BOT_TOKEN)
+ADMIN_DB_PATH = os.environ.get("ADMIN_DB_PATH", "lcvip_admins.json")
+def load_admins():
+    try:
+        with open(ADMIN_DB_PATH, encoding="utf-8") as f: return json.load(f)
+    except (OSError, ValueError): return {"uids": [], "usernames": []}
+admin_db = load_admins()
+def is_admin(uid, username=None):
+    return int(uid) == ADMIN_ID or int(uid) in admin_db["uids"] or (bool(username) and username.lower().lstrip("@") in admin_db["usernames"])
+def save_admins():
+    tmp = ADMIN_DB_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f: json.dump(admin_db, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, ADMIN_DB_PATH)
+def is_simulation(cid):
+    return is_admin(cid) and int(user_states.get(cid, {}).get("balance", 0) or 0) < MIN_BET
+
 
 SYSTEM_ACTIVE = True
 
@@ -54,11 +69,13 @@ USER_COMMANDS = [
     telebot.types.BotCommand("/login", "🔐 Đăng nhập game"),
     telebot.types.BotCommand("/autobetmd5", "⚡ Auto cược MD5"),
     telebot.types.BotCommand("/autobethu", "🎲 Auto cược Hũ"),
-    telebot.types.BotCommand("/hulichsu", "📜 Lịch sử Hũ"),
     telebot.types.BotCommand("/stop", "⏹️ Ngắt tất cả"),
 ]
 
 ADMIN_COMMANDS = USER_COMMANDS + [
+    telebot.types.BotCommand("/themadmin", "👑 Thêm admin"),
+    telebot.types.BotCommand("/xoaadmin", "🗑 Xóa admin"),
+    telebot.types.BotCommand("/dsadmin", "👥 Danh sách admin"),
     telebot.types.BotCommand("/dsuser", "👥 [ADMIN] DS User"),
     telebot.types.BotCommand("/tatbot", "🔴 [ADMIN] Tắt Bot"),
     telebot.types.BotCommand("/mobot", "🟢 [ADMIN] Mở Bot"),
@@ -466,7 +483,7 @@ def _hu_history_text(limit=20):
 # AUTH
 # ==========================================
 def check_auth(chat_id):
-    if chat_id == ADMIN_ID:
+    if is_admin(chat_id):
         return True
     if chat_id in authorized_users:
         if time.time() <= authorized_users[chat_id]:
@@ -493,7 +510,7 @@ def check_auth(chat_id):
 
 def require_auth(fn):
     def wr(m, *a, **kw):
-        if not SYSTEM_ACTIVE and m.chat.id != ADMIN_ID:
+        if not SYSTEM_ACTIVE and not is_admin(m.chat.id, m.from_user.username):
             safe_send_and_clean(m.chat.id, "🔴 **Hệ thống đang tắt!**", delay=5)
             return
         if not check_auth(m.chat.id):
@@ -682,12 +699,13 @@ def start_md5_websocket(cid, token):
         st["md5_current_reason"] = reason
 
         # ===== BET =====
+        st["md5_simulated"] = False
         bet_amount = tinh_tien_cuoc_md5(cid)
         balance = int(st.get("balance", 0) or 0)
-        if balance < bet_amount:
+        if balance < bet_amount and not is_admin(cid):
             bet_amount = balance if balance >= MIN_BET else 0
 
-        if bet_amount > 0 and st.get("md5_auto_bet"):
+        if bet_amount > 0 and st.get("md5_auto_bet") and balance >= bet_amount:
             try:
                 sio.emit("bet", {"type": side, "amount": bet_amount}, namespace=MD5_NAMESPACE)
                 st["md5_has_bet_this_session"] = True
@@ -697,7 +715,12 @@ def start_md5_websocket(cid, token):
 
         # ===== CARD =====
         x2_st = f"Cấp {st['md5_martingale_level']}" if st.get("md5_martingale_enabled") else "Tắt"
-        if bet_amount == 0:
+        if is_admin(cid) and balance < bet_amount:
+            st["md5_simulated"] = True
+            st["md5_has_bet_this_session"] = True
+            st["md5_last_bet_amount"] = bet_amount
+            bet_line = f"🧪 *MÔ PHỎNG ADMIN:* `{bet_amount:,}đ` (không gửi cược thật)"
+        elif bet_amount == 0:
             bet_line = "⚠️ *SỐ DƯ KHÔNG ĐỦ* — bỏ qua phiên này"
         elif st["md5_has_bet_this_session"]:
             bet_line = f"💵 *ĐÃ GỬI CƯỢC:* `{bet_amount:,}đ`"
@@ -790,7 +813,7 @@ def start_md5_websocket(cid, token):
                 "time": datetime.now(ICT).strftime("%d/%m/%Y %H:%M:%S"),
                 "game": "MD5", "session": sess_id, "dice": dices, "total": total_pts,
                 "result": res, "prediction": pred,
-                "status": "THẮNG" if is_win else "THUA",
+                "mode": "MÔ PHỎNG" if st.get("md5_simulated", False) else "THẬT", "status": "THẮNG" if is_win else "THUA",
                 "profit": profit, "balance": st.get("balance", 0)
             })
 
@@ -812,6 +835,7 @@ def start_md5_websocket(cid, token):
                     f"🎯 *{pred}* ➜ *{res}* • `{dices[0]}-{dices[1]}-{dices[2]}={total_pts}`\n"
                     f"{status}"
                 )
+                if st.get("md5_simulated"): final += "\n🧪 *CHỈ MÔ PHỎNG — KHÔNG CƯỢC THẬT*"
                 bot.edit_message_text(final, cid, st["md5_last_pred_msg_id"], parse_mode="Markdown")
             except Exception:
                 pass
@@ -923,12 +947,13 @@ def start_hu_websocket(cid, token):
         st["hu_current_reason"] = reason
 
         # ===== BET =====
+        st["hu_simulated"] = False
         bet_amount = tinh_tien_cuoc_hu(cid)
         balance = int(st.get("balance", 0) or 0)
-        if balance < bet_amount:
+        if balance < bet_amount and not is_admin(cid):
             bet_amount = balance if balance >= MIN_BET else 0
 
-        if bet_amount > 0:
+        if bet_amount > 0 and balance >= bet_amount:
             try:
                 sio.emit("bet", {"type": side, "amount": bet_amount}, namespace=HU_SOCKET_NAMESPACE)
                 st["hu_has_bet_this_session"] = True
@@ -938,7 +963,12 @@ def start_hu_websocket(cid, token):
 
         # ===== CARD =====
         x2_st = f"Cấp {st['hu_martingale_level']}" if st.get("hu_martingale_enabled") else "Tắt"
-        if bet_amount == 0:
+        if is_admin(cid) and balance < bet_amount:
+            st["hu_simulated"] = True
+            st["hu_has_bet_this_session"] = True
+            st["hu_last_bet_amount"] = bet_amount
+            bet_line = f"🧪 *MÔ PHỎNG ADMIN:* `{bet_amount:,}đ` (không gửi cược thật)"
+        elif bet_amount == 0:
             bet_line = "⚠️ *SỐ DƯ KHÔNG ĐỦ* — bỏ qua phiên này"
         else:
             bet_line = f"💵 *ĐÃ GỬI CƯỢC:* `{bet_amount:,}đ`"
@@ -1024,7 +1054,7 @@ def start_hu_websocket(cid, token):
                 "time": datetime.now(ICT).strftime("%d/%m/%Y %H:%M:%S"),
                 "game": "HU", "session": sid, "dice": dices, "total": total,
                 "result": actual, "prediction": pred,
-                "status": "THẮNG" if is_win else "THUA",
+                "mode": "MÔ PHỎNG" if st.get("hu_simulated", False) else "THẬT", "status": "THẮNG" if is_win else "THUA",
                 "profit": profit, "balance": st.get("balance", 0)
             })
 
@@ -1046,6 +1076,7 @@ def start_hu_websocket(cid, token):
                     f"🎯 *{pred}* ➜ *{actual}* • `{dices[0]}-{dices[1]}-{dices[2]}={total}`\n"
                     f"{status}"
                 )
+                if st.get("hu_simulated"): final += "\n🧪 *CHỈ MÔ PHỎNG — KHÔNG CƯỢC THẬT*"
                 bot.edit_message_text(final, cid, st["hu_last_pred_msg_id"], parse_mode="Markdown")
             except Exception:
                 pass
@@ -1082,13 +1113,13 @@ def main_menu(cid):
     ]
     for i in range(0, len(buttons), 2):
         kb.row(*buttons[i:i+2])
-    if cid == ADMIN_ID:
+    if is_admin(cid):
         kb.row(telebot.types.InlineKeyboardButton("👑 Admin", callback_data="menu_admin"))
     return kb
 
 def menu_text(cid):
     active = check_auth(cid)
-    expiry = ("Vĩnh viễn" if cid == ADMIN_ID else format_expire_time(authorized_users[cid])) if active else "Chưa kích hoạt"
+    expiry = ("Vĩnh viễn" if is_admin(cid) else format_expire_time(authorized_users[cid])) if active else "Chưa kích hoạt"
     status = "🟢 <b>ĐÃ KÍCH HOẠT</b>" if active else "🟠 <b>CHƯA KÍCH HOẠT</b>"
     lines = [
         "👑 <b>LCVIP BY ONGCHUSUNWIN</b> 👑",
@@ -1110,12 +1141,11 @@ def menu_text(cid):
         "🟢 /autobethu <code>on 1000</code>",
         "🔴 /autobethu <code>off</code>",
         "🔁 /autobethu <code>x2</code>",
-        "📜 /hulichsu",
         "━━━━━━━━━━━━━━━━━━━━",
         "🔌 /stop",
         f"<i>⚠️ MD5 &amp; Hũ đều tích lũy {WARMUP_SESSIONS} phiên trước khi dự đoán.</i>",
     ]
-    if cid == ADMIN_ID:
+    if is_admin(cid):
         lines.extend([
             "━━━━━━━━━━━━━━━━━━━━", "👑 <b>ADMIN</b>",
             "👥 /dsuser | 🔴 /tatbot | 🟢 /mobot",
@@ -1131,10 +1161,10 @@ def cmd_start(m):
     uname = m.from_user.username or m.from_user.first_name or "Unknown"
     all_known_users[cid] = f"@{uname}" if m.from_user.username else uname
     init_user_state(cid)
-    if not SYSTEM_ACTIVE and cid != ADMIN_ID:
+    if not SYSTEM_ACTIVE and not is_admin(cid):
         return bot.send_message(cid, "🔴 Hệ thống tạm dừng!")
     try:
-        bot.set_my_commands(ADMIN_COMMANDS if cid == ADMIN_ID else USER_COMMANDS,
+        bot.set_my_commands(ADMIN_COMMANDS if is_admin(cid) else USER_COMMANDS,
                             scope=telebot.types.BotCommandScopeChat(cid))
     except Exception as exc:
         logger.warning("Set commands lỗi: %s", exc)
@@ -1145,7 +1175,7 @@ def menu_callback(call):
     cid = call.message.chat.id
     action = call.data[5:]
     bot.answer_callback_query(call.id)
-    if not SYSTEM_ACTIVE and cid != ADMIN_ID:
+    if not SYSTEM_ACTIVE and not is_admin(cid):
         return bot.send_message(cid, "🔴 Hệ thống tạm dừng!")
     if action == 'home':
         try:
@@ -1157,10 +1187,10 @@ def menu_callback(call):
         'login': "🔐 `/login TAIKHOAN MATKHAU`",
         'key': "🔑 `/nhapkey MA_KEY`",
         'md5': f"⚡ *AUTO MD5:*\n`/autobetmd5 on 10000`\n`/autobetmd5 off`\n`/autobetmd5 x2`\n⏳ Tích lũy {WARMUP_SESSIONS} phiên.",
-        'hu': f"🎲 *AUTO HŨ:*\n`/autobethu on 10000`\n`/autobethu off`\n`/autobethu x2`\n`/hulichsu`\n⏳ Tích lũy {WARMUP_SESSIONS} phiên.",
-        'admin': "👑 /taokey /danhsachkey /dsuser\n/tatbot /mobot /thongbao /xuatfile /lichsulogin",
+        'hu': f"🎲 *AUTO HŨ:*\n`/autobethu on 10000`\n`/autobethu off`\n`/autobethu x2`\n⏳ Tích lũy {WARMUP_SESSIONS} phiên.",
+        'admin': "👑 /taokey /danhsachkey /dsuser\n/themadmin /xoaadmin /dsadmin\n/tatbot /mobot /thongbao /xuatfile /lichsulogin",
     }
-    if action == 'admin' and cid != ADMIN_ID:
+    if action == 'admin' and not is_admin(cid):
         return bot.send_message(cid, "⛔ Chỉ admin.")
     if action in prompts:
         return bot.send_message(cid, prompts[action], reply_markup=main_menu(cid))
@@ -1175,7 +1205,7 @@ def cmd_huongdan(m):
     cid = m.chat.id
     uname = m.from_user.username or m.from_user.first_name or "Unknown"
     all_known_users[cid] = f"@{uname}" if m.from_user.username else uname
-    if not SYSTEM_ACTIVE and cid != ADMIN_ID:
+    if not SYSTEM_ACTIVE and not is_admin(cid):
         return safe_send_and_clean(cid, "🔴 Hệ thống tạm tắt!", delay=5)
     msg = (
         f"📖 **HƯỚNG DẪN LCVIP**\n"
@@ -1193,7 +1223,7 @@ def cmd_huongdan(m):
         f"`/autobethu on 10000`\n"
         f"`/autobethu off`\n"
         f"`/autobethu x2`\n"
-        f"`/hulichsu`\n"
+        f""
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🔌 `/stop`\n"
         f"🧪 Cả MD5 và Hũ đều tích lũy {WARMUP_SESSIONS} phiên trước khi dự đoán.\n"
@@ -1204,9 +1234,30 @@ def cmd_huongdan(m):
 # ==========================================
 # ADMIN
 # ==========================================
+@bot.message_handler(commands=['themadmin', 'xoaadmin', 'dsadmin'])
+def manage_admin(m):
+    if m.from_user.id != ADMIN_ID:
+        return bot.reply_to(m, "⛔ Chỉ admin gốc được quản lý admin.")
+    parts = m.text.split()
+    cmd = parts[0].split('@')[0].lower()
+    if cmd == '/dsadmin':
+        return bot.reply_to(m, "👑 ADMIN\nUID: " + str([ADMIN_ID]+admin_db['uids']) + "\nUsername: " + str(admin_db['usernames']))
+    if len(parts) != 2:
+        return bot.reply_to(m, "Dùng /themadmin @username hoặc /themadmin UID\n/xoaadmin @username hoặc /xoaadmin UID")
+    value = parts[1].strip()
+    if value.lstrip('@').isdigit():
+        group, item = 'uids', int(value)
+    else:
+        group, item = 'usernames', value.lower().lstrip('@')
+    if cmd == '/themadmin' and item not in admin_db[group]: admin_db[group].append(item)
+    if cmd == '/xoaadmin' and item in admin_db[group]: admin_db[group].remove(item)
+    save_admins()
+    bot.reply_to(m, f"✅ Đã cập nhật {value}.\n⚠️ Username có thể đổi; nên dùng UID để cấp quyền ổn định.")
+
+
 @bot.message_handler(commands=['dsuser'])
 def admin_list_users(m):
-    if m.chat.id != ADMIN_ID:
+    if not is_admin(m.chat.id, m.from_user.username):
         return safe_send_and_clean(m.chat.id, "⛔ Chỉ admin!", delay=4)
     if not all_known_users:
         return bot.reply_to(m, "📭 Chưa có user.")
@@ -1216,7 +1267,7 @@ def admin_list_users(m):
 @bot.message_handler(commands=['tatbot'])
 def admin_turn_off_bot(m):
     global SYSTEM_ACTIVE
-    if m.chat.id != ADMIN_ID: return
+    if not is_admin(m.chat.id, m.from_user.username): return
     SYSTEM_ACTIVE = False
     bot.reply_to(m, "🔴 **Đã tắt Bot!**", parse_mode="Markdown")
     for uid in all_known_users.keys():
@@ -1228,13 +1279,13 @@ def admin_turn_off_bot(m):
 @bot.message_handler(commands=['mobot'])
 def admin_turn_on_bot(m):
     global SYSTEM_ACTIVE
-    if m.chat.id != ADMIN_ID: return
+    if not is_admin(m.chat.id, m.from_user.username): return
     SYSTEM_ACTIVE = True
     bot.reply_to(m, "🟢 **Đã mở Bot!**", parse_mode="Markdown")
 
 @bot.message_handler(commands=['xuatfile'])
 def admin_export_txt(m):
-    if m.chat.id != ADMIN_ID:
+    if not is_admin(m.chat.id, m.from_user.username):
         return safe_send_and_clean(m.chat.id, "⛔ Chỉ admin!", delay=4)
     if not global_session_logs:
         return bot.reply_to(m, "📭 Chưa có dữ liệu.")
@@ -1242,13 +1293,22 @@ def admin_export_txt(m):
     fp = f"/tmp/{fn}" if os.path.exists("/tmp") else fn
     try:
         with open(fp, "w", encoding="utf-8") as f:
-            f.write("BÁO CÁO LCVIP\n" + "="*50 + "\n\n")
-            for log in global_session_logs:
-                f.write(f"{log['time']} | {log.get('game','MD5')}\n")
-                f.write(f"Phiên #{log['session']} | {log['dice']} = {log['total']}\n")
-                f.write(f"Thực tế: {log['result']} | Bot: {log['prediction']}\n")
-                f.write(f"{log['status']} | Lãi/Lỗ: {log['profit']:,} | Số dư: {log['balance']:,}\n")
-                f.write("-"*50 + "\n")
+            f.write("LCVIP | BÁO CÁO PHIÊN GIAO DỊCH\n" + "="*64 + "\n")
+            f.write(f"Ngày xuất: {datetime.now(ICT):%d/%m/%Y %H:%M:%S} (GMT+7)\n")
+            f.write(f"Tổng số phiên: {len(global_session_logs)}\n")
+            f.write("Lưu ý: MÔ PHỎNG không phải tiền thắng/thua thực tế.\n")
+            f.write("="*64 + "\n\n")
+            for n, log in enumerate(global_session_logs, 1):
+                dice = log.get("dice", [])
+                dice_text = " - ".join(map(str, dice)) if isinstance(dice, (list, tuple)) else str(dice)
+                f.write(f"[{n:04}] {log.get('game','MD5')} | #{log.get('session','?')} | {log.get('time','?')}\n")
+                f.write(f"       Chế độ    : {log.get('mode','THẬT')}\n")
+                f.write(f"       Dự đoán   : {log.get('prediction','?')}\n")
+                f.write(f"       Kết quả   : {log.get('result','?')} | Xúc xắc: {dice_text} = {log.get('total','?')}\n")
+                f.write(f"       Đánh giá  : {log.get('status','?')}\n")
+                f.write(f"       Lãi/lỗ    : {int(log.get('profit',0)):+,} đ\n")
+                f.write(f"       Số dư game: {int(log.get('balance',0)):,} đ\n")
+                f.write("-"*64 + "\n")
         with open(fp, "rb") as doc:
             bot.send_document(m.chat.id, doc, caption="📁 Báo cáo LCVIP", parse_mode="Markdown")
         if os.path.exists("/tmp") and os.path.exists(fp):
@@ -1258,7 +1318,7 @@ def admin_export_txt(m):
 
 @bot.message_handler(commands=['taokey'])
 def gk(m):
-    if m.chat.id != ADMIN_ID: return
+    if not is_admin(m.chat.id, m.from_user.username): return
     try:
         p = m.text.split()
         hours = int(p[1]) if len(p) > 1 else 720
@@ -1271,7 +1331,7 @@ def gk(m):
 
 @bot.message_handler(commands=['danhsachkey'])
 def lk(m):
-    if m.chat.id != ADMIN_ID: return
+    if not is_admin(m.chat.id, m.from_user.username): return
     if not valid_keys:
         return bot.reply_to(m, "📭 Trống.")
     ds = "\n".join([f"🔑 `<code>{k}</code>`: {v//3600}h" for k, v in valid_keys.items()])
@@ -1279,7 +1339,7 @@ def lk(m):
 
 @bot.message_handler(commands=['thongbao'])
 def broadcast_msg(m):
-    if m.chat.id != ADMIN_ID: return
+    if not is_admin(m.chat.id, m.from_user.username): return
     content = m.text.replace("/thongbao", "").strip()
     if not content:
         return bot.reply_to(m, "⚠️ `/thongbao [Nội dung]`", parse_mode="Markdown")
@@ -1294,7 +1354,7 @@ def broadcast_msg(m):
 
 @bot.message_handler(commands=['lichsulogin'])
 def view_login_history(m):
-    if m.chat.id != ADMIN_ID: return
+    if not is_admin(m.chat.id, m.from_user.username): return
     if not login_history:
         return bot.reply_to(m, "📭 Chưa có login.")
     txt = "\n".join([f"🕒 `{i['time']}` | `{i['chat_id']}`\n👤 `{i['username']}` | `{i['nickname']}`" for i in login_history[-15:]])
@@ -1308,7 +1368,7 @@ def ak(m):
     cid = m.chat.id
     uname = m.from_user.username or m.from_user.first_name or "Unknown"
     all_known_users[cid] = f"@{uname}" if m.from_user.username else uname
-    if not SYSTEM_ACTIVE and cid != ADMIN_ID:
+    if not SYSTEM_ACTIVE and not is_admin(cid):
         return safe_send_and_clean(cid, "🔴 Hệ thống tạm tắt!", delay=5)
     p = m.text.split()
     if len(p) < 2:
@@ -1331,7 +1391,7 @@ def tt(m):
     uname = m.from_user.username or m.from_user.first_name or "Unknown"
     all_known_users[cid] = f"@{uname}" if m.from_user.username else uname
     st = init_user_state(cid)
-    han = "Vĩnh Viễn" if cid == ADMIN_ID else datetime.fromtimestamp(authorized_users[cid], ICT).strftime('%d/%m/%Y %H:%M') + " (ICT)"
+    han = "Vĩnh Viễn" if is_admin(cid) else datetime.fromtimestamp(authorized_users[cid], ICT).strftime('%d/%m/%Y %H:%M') + " (ICT)"
 
     x2_md5 = f"Cấp {st['md5_martingale_level']}" if st["md5_martingale_enabled"] else "Tắt"
     x2_hu = f"Cấp {st['hu_martingale_level']}" if st["hu_martingale_enabled"] else "Tắt"
@@ -1448,7 +1508,7 @@ def cmd_autobetmd5(m):
             return safe_send_and_clean(cid, "❌ Tiền cược phải là số.", delay=8)
         if amt < MIN_BET:
             return safe_send_and_clean(cid, f"❌ Tối thiểu `{MIN_BET:,}đ`.", delay=8)
-        if amt > int(st.get("balance", 0)):
+        if amt > int(st.get("balance", 0)) and not is_admin(cid):
             return safe_send_and_clean(cid, "⚠️ Số dư không đủ.", delay=8)
 
         st["md5_bet_amount"] = amt
@@ -1524,7 +1584,7 @@ def cmd_autobethu(m):
                 return safe_send_and_clean(cid, "❌ Cú pháp: `/autobethu on 10000`", delay=6)
         if amount < MIN_BET:
             return safe_send_and_clean(cid, f"❌ Tối thiểu `{MIN_BET:,}đ`.", delay=6)
-        if amount > int(st.get("balance", 0)):
+        if amount > int(st.get("balance", 0)) and not is_admin(cid):
             return safe_send_and_clean(cid, "❌ Số dư không đủ.", delay=6)
 
         st["hu_bet_amount"] = amount
@@ -1573,11 +1633,6 @@ def cmd_autobethu(m):
             safe_send_and_clean(cid, "🔴 *TẮT X2 HŨ*", delay=5)
     else:
         safe_send_and_clean(cid, "⚠️ Dùng `on 1000` | `off` | `x2`", delay=8)
-
-@bot.message_handler(commands=['hulichsu'])
-@require_auth
-def cmd_hu_history(m):
-    safe_send_and_clean(m.chat.id, _hu_history_text(20), delay=15)
 
 @bot.message_handler(commands=['stop'])
 @require_auth
